@@ -34,11 +34,12 @@ Only building needs tools: `winget install Rustlang.Rustup Microsoft.VisualStudi
 ```powershell
 cargo build --release
 .\download-model.ps1   # 2.4 GB from Hugging Face -> %LOCALAPPDATA%\parakey\model
-.\install.ps1          # copies the exe to %LOCALAPPDATA%\parakey, adds a startup shortcut, launches
+.\install.ps1          # copies the exe to %LOCALAPPDATA%\parakey, adds a Start Menu entry, launches
 ```
 
-`.\install.ps1 -Uninstall` removes the startup entry. Quit Wispr Flow (or change its hotkey)
-first, or both apps will react to Ctrl+Win.
+After that, press the Windows key and type "parakey" to start it. `.\install.ps1 -Startup` also
+launches it at sign-in; `.\install.ps1 -Uninstall` removes the shortcuts. Quit Wispr Flow (or change
+its hotkey) first, or both apps will react to Ctrl+Win.
 
 ## Files in `%LOCALAPPDATA%\parakey\`
 
