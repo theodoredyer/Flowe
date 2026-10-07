@@ -1,0 +1,23 @@
+[project]
+name = "parakey"
+version = "0.1.0"
+description = "Local push-to-talk dictation for Windows (Parakeet + hotkey + paste)"
+authors = [
+    { name = "theodoredyer", email = "theodore.austin.dyer@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "keyboard>=0.13.5",
+    "numpy>=2.5.3",
+    "onnx-asr[hub]>=0.12.0",
+    "onnxruntime-directml>=1.24.4",
+    "pyperclip>=1.11.0",
+    "sounddevice>=0.5.6",
+]
+
+[project.scripts]
+parakey = "parakey:main"
+
+[build-system]
+requires = ["uv_build>=0.12.23,<0.13.0"]
+build-backend = "uv_build"
