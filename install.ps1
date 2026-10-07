@@ -23,16 +23,18 @@ Get-Process parakey -ErrorAction SilentlyContinue | Stop-Process
 Start-Sleep -Milliseconds 300
 Copy-Item "$src\parakey.exe", "$src\DirectML.dll" $dest -Force
 
-function New-Link($path) {
+function New-Link($path, $arguments) {
     $s = (New-Object -ComObject WScript.Shell).CreateShortcut($path)
     $s.TargetPath = $exe
+    $s.Arguments = $arguments
     $s.WorkingDirectory = $dest
     $s.Description = "Local push-to-talk dictation (Ctrl+Win)"
     $s.Save()
 }
-New-Link $menuLink
-if ($Startup) { New-Link $startupLink } else { Remove-Item $startupLink -ErrorAction SilentlyContinue }
+New-Link $menuLink ""
+# At sign-in, start quietly in the tray instead of opening the dashboard.
+if ($Startup) { New-Link $startupLink "--tray" } else { Remove-Item $startupLink -ErrorAction SilentlyContinue }
 
 if (-not (Test-Path (Join-Path $dest "model\vocab.txt"))) { "model missing: run .\download-model.ps1" }
-Start-Process $exe
-"installed to $dest; 'parakey' is in the Start Menu$(if ($Startup) { ' and starts at sign-in' }); running now (mic icon in the tray)"
+Start-Process $exe -ArgumentList "--tray"   # quiet start; the Start Menu entry opens the dashboard
+"installed to $dest; 'parakey' is in the Start Menu$(if ($Startup) { ' and starts at sign-in' }); running now (P badge in the tray)"

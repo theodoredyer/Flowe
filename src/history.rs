@@ -61,30 +61,47 @@ impl History {
         let _ = std::fs::remove_file(&self.path);
     }
 
-    /// Two-line summary for the stats panel.
-    pub fn summary(&self) -> String {
-        let n = self.entries.len();
-        if n == 0 {
-            return "No recordings yet.".into();
-        }
+    pub fn stats(&self) -> Stats {
         let now = crate::win::local_time();
         let today = &now[..10];
-        let words: u64 = self.entries.iter().map(|e| e.words as u64).sum();
-        let audio: u64 = self.entries.iter().map(|e| e.audio_ms as u64).sum();
-        let latency: u64 = self.entries.iter().map(|e| e.latency_ms as u64).sum();
-        let (n_today, words_today) = self
-            .entries
-            .iter()
-            .filter(|e| e.when.starts_with(today))
-            .fold((0u64, 0u64), |(c, w), e| (c + 1, w + e.words as u64));
-        let wpm = if audio > 0 { words as f64 / (audio as f64 / 60_000.0) } else { 0.0 };
-        let speed = if latency > 0 { audio as f64 / latency as f64 } else { 0.0 };
-        format!(
-            "{n} recordings  ·  {words} words  ·  {} of speech  ·  you dictate at ~{wpm:.0} words/min\r\n\
-             Today: {n_today} recordings, {words_today} words  ·  transcription takes {:.2}s on average ({speed:.0}× faster than realtime)",
-            fmt_duration(audio),
-            latency as f64 / n as f64 / 1000.0,
-        )
+        let mut st = Stats::default();
+        for e in &self.entries {
+            st.recordings += 1;
+            st.words += e.words as u64;
+            st.audio_ms += e.audio_ms as u64;
+            st.latency_ms += e.latency_ms as u64;
+            if e.when.starts_with(today) {
+                st.today_recordings += 1;
+                st.today_words += e.words as u64;
+            }
+        }
+        st
+    }
+}
+
+#[derive(Default, Debug, PartialEq, Eq)]
+pub struct Stats {
+    pub recordings: u64,
+    pub words: u64,
+    pub audio_ms: u64,
+    pub latency_ms: u64,
+    pub today_recordings: u64,
+    pub today_words: u64,
+}
+
+impl Stats {
+    /// Dictation pace: words per minute of speech.
+    pub fn wpm(&self) -> f64 {
+        if self.audio_ms > 0 { self.words as f64 / (self.audio_ms as f64 / 60_000.0) } else { 0.0 }
+    }
+
+    pub fn avg_latency_s(&self) -> f64 {
+        if self.recordings > 0 { self.latency_ms as f64 / self.recordings as f64 / 1000.0 } else { 0.0 }
+    }
+
+    /// Seconds of speech transcribed per second of compute.
+    pub fn speed(&self) -> f64 {
+        if self.latency_ms > 0 { self.audio_ms as f64 / self.latency_ms as f64 } else { 0.0 }
     }
 }
 

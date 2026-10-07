@@ -1,12 +1,12 @@
-//! Notification-area icon: grey = loading, white = ready, red = recording.
+//! Notification-area icon: the "P" badge. Dark = ready, red = recording, grey = loading,
+//! amber = model error, faint = paused.
 
-use tiny_skia::Pixmap;
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-use crate::overlay::{capsule, fill, rect};
+use crate::icon;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -20,16 +20,23 @@ pub enum Status {
 pub struct Tray {
     hwnd: HWND,
     msg: u32,
-    icons: [HICON; 5],
+    icons: [HICON; 5], // indexed by Status
     pub status: Status,
     tip: String,
 }
 
 impl Tray {
     pub fn new(hwnd: HWND, msg: u32) -> Self {
-        // grey = loading, white = ready, red = recording, amber = error, faint = paused
-        let colors = [[113, 113, 122, 255], [228, 228, 231, 255], [239, 68, 68, 255], [245, 158, 11, 255], [113, 113, 122, 110]];
-        let mut t = Self { hwnd, msg, icons: colors.map(mic_icon), status: Status::Loading, tip: "parakey - loading model...".into() };
+        let n = unsafe { GetSystemMetrics(SM_CXSMICON).max(16) } as u32;
+        let styles: [([u8; 4], u8); 5] = [
+            ([113, 113, 122, 255], 255), // loading
+            (icon::INK, 255),            // ready
+            ([239, 68, 68, 255], 255),   // recording
+            ([245, 158, 11, 255], 255),  // error
+            ([113, 113, 122, 255], 120), // paused
+        ];
+        let icons = styles.map(|(bg, alpha)| icon::badge(n, bg, alpha).map_or(core::ptr::null_mut(), hicon));
+        let mut t = Self { hwnd, msg, icons, status: Status::Loading, tip: "parakey - loading model...".into() };
         t.add();
         t
     }
@@ -73,25 +80,9 @@ impl Drop for Tray {
     }
 }
 
-fn mic_icon(c: [u8; 4]) -> HICON {
+fn hicon(px: tiny_skia::Pixmap) -> HICON {
     unsafe {
-        let n = GetSystemMetrics(SM_CXSMICON).max(16);
-        let s = n as f32 / 16.0;
-        let Some(mut px) = Pixmap::new(n as u32, n as u32) else { return core::ptr::null_mut() };
-        fill(&mut px, capsule(5.5 * s, 1.0 * s, 5.0 * s, 9.0 * s), c); // head
-        let mut pb = tiny_skia::PathBuilder::new(); // U-shaped holder
-        pb.move_to(3.5 * s, 7.0 * s);
-        pb.cubic_to(3.5 * s, 13.0 * s, 12.5 * s, 13.0 * s, 12.5 * s, 7.0 * s);
-        if let Some(path) = pb.finish() {
-            let mut paint = tiny_skia::Paint::default();
-            paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
-            paint.anti_alias = true;
-            let stroke = tiny_skia::Stroke { width: 1.5 * s, line_cap: tiny_skia::LineCap::Round, ..Default::default() };
-            px.stroke_path(&path, &paint, &stroke, tiny_skia::Transform::identity(), None);
-        }
-        fill(&mut px, rect(7.25 * s, 11.5 * s, 1.5 * s, 3.0 * s), c); // stem
-        fill(&mut px, capsule(4.5 * s, 14.0 * s, 7.0 * s, 1.5 * s), c); // base
-
+        let n = px.width() as i32;
         let mut bmi: BITMAPINFO = core::mem::zeroed();
         bmi.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
         bmi.bmiHeader.biWidth = n;

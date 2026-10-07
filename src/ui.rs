@@ -1,5 +1,5 @@
-//! The app window: pause/resume, usage stats, recording history.
-//! Hidden by default (left-click the tray icon opens it); closing it only hides it.
+//! The dashboard window: pause/resume, usage stats, recording history.
+//! Shown on launch; closing it only hides it (left-click the tray icon to bring it back).
 
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
@@ -18,17 +18,18 @@ pub const ID_CLEAR: usize = 11;
 pub const ID_LIST: usize = 12;
 const MAX_ROWS: usize = 1000;
 const TEXT_COL: usize = 3;
+const GREY: u32 = 0x007A_7171; // COLORREF is BGR
 
 pub struct Ui {
     pub hwnd: HWND,
     status: HWND,
-    stats: HWND,
     pause: HWND,
+    tiles: [(HWND, HWND); 4], // (value, label)
+    today: HWND,
     hint: HWND,
     clear: HWND,
     list: HWND,
-    font: HFONT,
-    bold: HFONT,
+    fonts: [HFONT; 3], // normal, bold, big
     s: f32,
 }
 
@@ -36,14 +37,14 @@ fn px(s: f32, v: i32) -> i32 {
     (v as f32 * s).round() as i32
 }
 
-unsafe fn font(s: f32, pt: i32, weight: i32) -> HFONT {
+unsafe fn font(s: f32, pt: i32, weight: u32) -> HFONT {
     unsafe {
         CreateFontW(
             -px(s, pt * 96 / 72),
             0,
             0,
             0,
-            weight,
+            weight as i32,
             0,
             0,
             0,
@@ -86,8 +87,8 @@ impl Ui {
                 WS_OVERLAPPEDWINDOW,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
-                px(s, 680),
-                px(s, 480),
+                px(s, 720),
+                px(s, 540),
                 core::ptr::null_mut(),
                 core::ptr::null_mut(),
                 hinst,
@@ -112,10 +113,12 @@ impl Ui {
                     core::ptr::null(),
                 )
             };
-            let status = child("STATIC", "", (SS_LEFT | SS_ENDELLIPSIS) as u32, 0);
+            let label = |text: &str| child("STATIC", text, (SS_LEFT | SS_ENDELLIPSIS) as u32, 0);
+            let status = label("");
             let pause = child("BUTTON", "Pause", WS_TABSTOP | BS_PUSHBUTTON as u32, ID_PAUSE);
-            let stats = child("STATIC", "", SS_LEFT as u32, 0);
-            let hint = child("STATIC", "History  ·  double-click a row to copy it again", (SS_LEFT | SS_ENDELLIPSIS) as u32, 0);
+            let tiles = ["recordings", "words dictated", "of speech", "words / min"].map(|l| (label("–"), label(l)));
+            let today = label("");
+            let hint = label("History  ·  double-click a row to copy it again");
             let clear = child("BUTTON", "Clear history", WS_TABSTOP | BS_PUSHBUTTON as u32, ID_CLEAR);
             let list = CreateWindowExW(
                 0,
@@ -144,12 +147,19 @@ impl Ui {
                 SendMessageW(list, LVM_INSERTCOLUMNW, i, &col as *const _ as LPARAM);
             }
 
-            let font = font(s, 9, FW_NORMAL as i32);
-            let bold = font_(s);
-            for (h, f) in [(status, bold), (pause, font), (stats, font), (hint, font), (clear, font), (list, font)] {
+            let fonts = [font(s, 9, FW_NORMAL), font(s, 11, FW_SEMIBOLD), font(s, 22, FW_SEMIBOLD)];
+            let set_font = |h: HWND, f: HFONT| {
                 SendMessageW(h, WM_SETFONT, f as usize, 1);
+            };
+            set_font(status, fonts[1]);
+            for (value, lbl) in tiles {
+                set_font(value, fonts[2]);
+                set_font(lbl, fonts[0]);
             }
-            let ui = Self { hwnd, status, stats, pause, hint, clear, list, font, bold, s };
+            for h in [pause, today, hint, clear, list] {
+                set_font(h, fonts[0]);
+            }
+            let ui = Self { hwnd, status, pause, tiles, today, hint, clear, list, fonts, s };
             ui.layout();
             Some(ui)
         }
@@ -160,15 +170,24 @@ impl Ui {
             let mut r: RECT = core::mem::zeroed();
             GetClientRect(self.hwnd, &mut r);
             let (w, h, s) = (r.right, r.bottom, self.s);
-            let m = px(s, 16);
+            let m = px(s, 20);
             let (bw, bh) = (px(s, 104), px(s, 30));
-            MoveWindow(self.status, m, px(s, 18), w - 2 * m - bw - px(s, 12), px(s, 26), 1);
-            MoveWindow(self.pause, w - m - bw, px(s, 15), bw, bh, 1);
-            MoveWindow(self.stats, m, px(s, 54), w - 2 * m, px(s, 40), 1);
+            MoveWindow(self.status, m, px(s, 20), w - 2 * m - bw - px(s, 12), px(s, 26), 1);
+            MoveWindow(self.pause, w - m - bw, px(s, 17), bw, bh, 1);
+
+            let gap = px(s, 12);
+            let tw = (w - 2 * m - 3 * gap) / 4;
+            for (i, (value, lbl)) in self.tiles.iter().enumerate() {
+                let x = m + i as i32 * (tw + gap);
+                MoveWindow(*value, x, px(s, 62), tw, px(s, 36), 1);
+                MoveWindow(*lbl, x, px(s, 98), tw, px(s, 18), 1);
+            }
+            MoveWindow(self.today, m, px(s, 128), w - 2 * m, px(s, 18), 1);
+
             let cw = px(s, 104);
-            MoveWindow(self.hint, m, px(s, 108), w - 2 * m - cw - px(s, 12), px(s, 20), 1);
-            MoveWindow(self.clear, w - m - cw, px(s, 102), cw, px(s, 28), 1);
-            let top = px(s, 138);
+            MoveWindow(self.hint, m, px(s, 166), w - 2 * m - cw - px(s, 12), px(s, 20), 1);
+            MoveWindow(self.clear, w - m - cw, px(s, 160), cw, px(s, 28), 1);
+            let top = px(s, 196);
             MoveWindow(self.list, m, top, w - 2 * m, (h - top - m).max(px(s, 60)), 1);
             // The text column takes whatever width is left.
             let used: i32 = (0..TEXT_COL).map(|i| SendMessageW(self.list, LVM_GETCOLUMNWIDTH, i, 0) as i32).sum();
@@ -178,7 +197,7 @@ impl Ui {
     }
 
     pub fn min_size(&self) -> (i32, i32) {
-        (px(self.s, 520), px(self.s, 340))
+        (px(self.s, 560), px(self.s, 400))
     }
 
     pub fn show(&self) {
@@ -196,7 +215,30 @@ impl Ui {
     }
 
     pub fn set_stats(&self, h: &History) {
-        unsafe { SetWindowTextW(self.stats, wide(&h.summary()).as_ptr()) };
+        let st = h.stats();
+        let values = [
+            thousands(st.recordings),
+            thousands(st.words),
+            fmt_duration(st.audio_ms),
+            if st.audio_ms > 0 { format!("{:.0}", st.wpm()) } else { "–".into() },
+        ];
+        let today = if st.recordings == 0 {
+            "No recordings yet. Hold Ctrl+Win and say something.".to_string()
+        } else {
+            format!(
+                "Today: {} recordings, {} words   ·   transcription takes {:.2}s on average, {:.0}× faster than realtime",
+                st.today_recordings,
+                thousands(st.today_words),
+                st.avg_latency_s(),
+                st.speed()
+            )
+        };
+        unsafe {
+            for ((value, _), text) in self.tiles.iter().zip(values) {
+                SetWindowTextW(*value, wide(&text).as_ptr());
+            }
+            SetWindowTextW(self.today, wide(&today).as_ptr());
+        }
     }
 
     /// Refill the list, newest first.
@@ -242,26 +284,38 @@ impl Ui {
         }
     }
 
-    /// WM_CTLCOLORSTATIC: draw labels on the window background instead of grey.
-    pub fn static_brush(&self, hdc: HDC) -> HBRUSH {
+    /// WM_CTLCOLORSTATIC: labels on the window background, secondary text in grey.
+    pub fn static_brush(&self, hdc: HDC, ctl: HWND) -> HBRUSH {
         unsafe {
             SetBkColor(hdc, GetSysColor(COLOR_WINDOW));
+            if ctl == self.today || self.tiles.iter().any(|(_, lbl)| *lbl == ctl) {
+                SetTextColor(hdc, GREY);
+            }
             GetSysColorBrush(COLOR_WINDOW)
         }
     }
 }
 
-unsafe fn font_(s: f32) -> HFONT {
-    unsafe { font(s, 11, FW_SEMIBOLD as i32) }
-}
-
 impl Drop for Ui {
     fn drop(&mut self) {
         unsafe {
-            DeleteObject(self.font);
-            DeleteObject(self.bold);
+            for f in self.fonts {
+                DeleteObject(f);
+            }
         }
     }
+}
+
+fn thousands(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// "2026-10-07 15:40:12" -> "15:40" today, "10-07 15:40" otherwise.
@@ -271,4 +325,14 @@ fn fmt_when(when: &str) -> String {
     }
     let now = crate::win::local_time();
     if when.starts_with(&now[..10]) { when[11..16].to_string() } else { when[5..16].to_string() }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn thousands() {
+        assert_eq!(super::thousands(0), "0");
+        assert_eq!(super::thousands(999), "999");
+        assert_eq!(super::thousands(1234567), "1,234,567");
+    }
 }

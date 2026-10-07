@@ -3,8 +3,10 @@
 
 mod asr;
 mod audio;
+mod draw;
 mod history;
 mod hotkey;
+mod icon;
 mod overlay;
 mod tray;
 mod ui;
@@ -23,7 +25,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use history::{Entry, History};
 use hotkey::Action;
-use overlay::{Overlay, View};
+use overlay::{Idle, Overlay, View};
 use tray::{Status, Tray};
 use ui::Ui;
 use win::wide;
@@ -40,6 +42,8 @@ const ID_LOG: usize = 2;
 const ID_OPEN: usize = 3;
 const ID_TOGGLE: usize = 4;
 const TIP_READY: &str = "parakey - Ctrl+Win to talk, +Space to lock";
+/// Broadcast by a second instance so the running one shows its dashboard.
+const SHOW_MSG_NAME: &str = "parakey-show";
 
 enum AsrMsg {
     Ready,
@@ -70,6 +74,7 @@ struct App {
     paused: bool,
     started: Instant,
     taskbar_created: u32,
+    show_me: u32,
 }
 
 thread_local! {
@@ -91,21 +96,28 @@ impl App {
         unsafe { SetTimer(self.hwnd, TIMER_ANIM, 33, None) };
     }
 
-    /// Push the current state to the tray icon, tooltip and window header.
+    /// Push the current state to the tray icon, tooltip, idle dash and window header.
     fn sync(&mut self) {
-        let (status, tip, text, button) = if self.paused {
-            (Status::Paused, "parakey - paused", "Paused. Ctrl+Win does nothing until you resume.", "Resume")
+        let (status, tip, text, button, idle) = if self.paused {
+            (Status::Paused, "parakey - paused", "Paused. Ctrl+Win does nothing until you resume.", "Resume", None)
         } else if self.recording {
-            (Status::Recording, TIP_READY, "Recording…", "Pause")
+            (Status::Recording, TIP_READY, "Recording…", "Pause", Some(Idle::Ready))
         } else {
             match self.model {
-                Model::Loading => (Status::Loading, "parakey - loading model...", "Loading the speech model…", "Pause"),
-                Model::Failed => (Status::Error, "parakey - model failed to load (see log)", "The speech model failed to load. Open the log from the tray menu.", "Pause"),
-                Model::Ready => (Status::Ready, TIP_READY, "Listening. Hold Ctrl+Win to talk; tap Space while holding to lock.", "Pause"),
+                Model::Loading => (Status::Loading, "parakey - loading model...", "Loading the speech model…", "Pause", Some(Idle::Loading)),
+                Model::Failed => (
+                    Status::Error,
+                    "parakey - model failed to load (see log)",
+                    "The speech model failed to load. Open the log from the tray menu.",
+                    "Pause",
+                    Some(Idle::Error),
+                ),
+                Model::Ready => (Status::Ready, TIP_READY, "Listening. Hold Ctrl+Win to talk; tap Space while holding to lock.", "Pause", Some(Idle::Ready)),
             }
         };
         self.tray.set(status, Some(tip));
         self.ui.set_status(text, button);
+        self.overlay.set_idle(idle);
     }
 
     fn set_paused(&mut self, paused: bool) {
@@ -120,6 +132,11 @@ impl App {
         self.sync();
     }
 
+    fn flash(&mut self) {
+        self.overlay.set(View::Flash);
+        self.animate();
+    }
+
     fn on_action(&mut self, action: Action) {
         match action {
             Action::Start => {
@@ -132,8 +149,7 @@ impl App {
                     if let Ok(mut c) = hotkey::COMBO.lock() {
                         c.reset();
                     }
-                    self.overlay.set(View::Nothing);
-                    self.animate();
+                    self.flash();
                     return;
                 }
                 self.recording = true;
@@ -146,7 +162,7 @@ impl App {
             Action::Cancel => {
                 self.recording = false;
                 drop(self.recorder.stop());
-                self.overlay.set(View::Hidden);
+                self.overlay.back_to_idle();
             }
         }
         self.sync();
@@ -162,10 +178,9 @@ impl App {
         let too_short = self.started.elapsed() < MIN_HOLD || audio.len() < rate as usize * 3 / 10;
         if self.model == Model::Failed {
             // Nobody will ever consume the job; don't let recordings pile up in memory.
-            self.overlay.set(View::Nothing);
-            self.animate();
+            self.flash();
         } else if too_short || self.jobs.send((audio, rate)).is_err() {
-            self.overlay.set(View::Hidden);
+            self.overlay.back_to_idle();
         } else {
             self.overlay.set(View::Transcribing);
         }
@@ -182,13 +197,12 @@ impl App {
                     self.history.push(entry);
                     self.ui.set_stats(&self.history);
                     if !self.recording {
-                        self.overlay.set(View::Hidden);
+                        self.overlay.back_to_idle();
                     }
                 }
                 AsrMsg::Empty | AsrMsg::Failed => {
                     if !self.recording {
-                        self.overlay.set(View::Nothing);
-                        self.animate();
+                        self.flash();
                     }
                 }
             }
@@ -320,12 +334,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_CTLCOLORSTATIC => {
             let mut brush = core::ptr::null_mut();
-            with_app(|app| brush = app.ui.static_brush(wparam as HDC));
+            with_app(|app| brush = app.ui.static_brush(wparam as HDC, lparam as HWND));
             if !brush.is_null() {
                 return brush as LRESULT;
             }
             return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
         }
+        // Taskbar moved/resized or monitors changed: keep the dash just above the taskbar.
+        WM_DISPLAYCHANGE | WM_SETTINGCHANGE => with_app(|app| app.overlay.place()),
         WM_CLOSE => unsafe {
             ShowWindow(hwnd, SW_HIDE); // keep running in the tray
         },
@@ -338,6 +354,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             with_app(|app| {
                 if msg == app.taskbar_created {
                     app.tray.add();
+                    handled = true;
+                } else if msg == app.show_me {
+                    app.ui.show();
                     handled = true;
                 }
             });
@@ -405,9 +424,19 @@ fn asr_thread(hwnd: usize, jobs: mpsc::Receiver<(Vec<f32>, u32)>, results: mpsc:
 
 fn main() {
     let _ = std::fs::create_dir_all(win::data_dir());
+    let show_me = unsafe { RegisterWindowMessageW(wide(SHOW_MSG_NAME).as_ptr()) };
     if !win::single_instance() {
+        // Already running: just bring up its dashboard (e.g. launched again from Start).
+        unsafe {
+            let other = FindWindowW(wide("parakey-main").as_ptr(), core::ptr::null());
+            if !other.is_null() {
+                AllowSetForegroundWindow(ASFW_ANY);
+                PostMessageW(other, show_me, 0, 0);
+            }
+        }
         return;
     }
+    let start_hidden = std::env::args().any(|a| a == "--tray");
     win::log("starting");
     unsafe {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_SYSTEM_AWARE);
@@ -445,9 +474,15 @@ fn main() {
                 paused: false,
                 started: Instant::now(),
                 taskbar_created,
+                show_me,
             })
         });
-        with_app(|app| app.sync());
+        with_app(|app| {
+            app.sync();
+            if !start_hidden {
+                app.ui.show();
+            }
+        });
         hotkey::install(hwnd, WM_ACTION);
 
         let mut m: MSG = core::mem::zeroed();

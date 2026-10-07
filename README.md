@@ -9,8 +9,9 @@ No cloud, no account, no usage limits.
   on any Windows GPU without CUDA, and falls back to CPU.
 - Idle cost is zero: the mic is closed, no timers run, CPU sits at 0.00%. Only the keyboard
   hook is alive. Pausing removes even that.
-- A small recording indicator at the bottom of the screen, a tray icon, and a window with
-  pause/resume, your recording history and usage stats.
+- A tiny dash just above the taskbar means it is listening; it grows into a level meter while
+  recording. A "P" badge sits in the tray, and the dashboard window (opens on launch, closing it
+  only hides it) has pause/resume, your recording history and usage stats.
 
 ## Controls
 
@@ -20,7 +21,7 @@ No cloud, no account, no usage limits.
 | ...then tap **Space** | locks: keeps recording hands-free; press Ctrl+Win again to stop |
 | **Esc** while locked | cancels |
 | Ctrl+Win + any other key | cancels and passes through, so Ctrl+Win+Left etc still work |
-| Tray icon, left-click | opens the window |
+| Tray icon, left-click | opens the dashboard (so does launching parakey again) |
 | Tray icon, right-click | Open / Pause listening / Open log / Quit |
 
 Taps shorter than 0.3 s are ignored. A forgotten locked recording stops itself after 5 minutes.
@@ -38,7 +39,8 @@ cargo build --release
 ```
 
 After that, press the Windows key and type "parakey" to start it. `.\install.ps1 -Startup` also
-launches it at sign-in; `.\install.ps1 -Uninstall` removes the shortcuts. Quit Wispr Flow (or change
+launches it at sign-in, hidden in the tray (`parakey.exe --tray`); `.\install.ps1 -Uninstall`
+removes the shortcuts. `cargo run --release --bin mkicon` regenerates the app icon. Quit Wispr Flow (or change
 its hotkey) first, or both apps will react to Ctrl+Win.
 
 ## Files in `%LOCALAPPDATA%\parakey\`

@@ -1,23 +1,36 @@
-//! Tiny pill near the bottom of the screen. Click-through, never takes focus.
-//! Only redraws (on a 30 fps timer) while visible; hidden = zero work.
+//! Bottom-center indicator, click-through, never takes focus.
+//! Idle: a tiny dash just above the taskbar meaning "parakey is listening". Recording: a pill
+//! with a level meter. Static states are drawn once and cost nothing; only the animated ones
+//! run a timer.
 
-use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, Transform};
+use tiny_skia::Pixmap;
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
+use crate::draw::{capsule, circle, fill, rect};
 use crate::win::wide;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Idle {
+    Loading,
+    Ready,
+    Error,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum View {
+    /// Paused: nothing on screen.
     Hidden,
+    /// The small dash.
+    Idle(Idle),
     Recording,
     Locked,
     Transcribing,
-    /// Nothing was heard; shown briefly.
-    Nothing,
+    /// Nothing was heard: the dash flashes amber, then returns to idle.
+    Flash,
 }
 
 const BARS: usize = 9;
@@ -37,6 +50,8 @@ pub struct Overlay {
     dib: HBITMAP,
     bits: *mut u8,
     pub view: View,
+    /// What to fall back to when a recording ends.
+    idle: View,
     tick: u32,
     levels: [f32; BARS],
 }
@@ -97,10 +112,24 @@ impl Overlay {
                 dib,
                 bits: bits as *mut u8,
                 view: View::Hidden,
+                idle: View::Hidden,
                 tick: 0,
                 levels: [0.0; BARS],
             })
         }
+    }
+
+    /// What to show when nothing is happening; `None` (paused) shows nothing at all.
+    /// Applies immediately unless a recording is in progress.
+    pub fn set_idle(&mut self, idle: Option<Idle>) {
+        self.idle = idle.map_or(View::Hidden, View::Idle);
+        if matches!(self.view, View::Hidden | View::Idle(_)) {
+            self.set(self.idle);
+        }
+    }
+
+    pub fn back_to_idle(&mut self) {
+        self.set(self.idle);
     }
 
     pub fn set(&mut self, view: View) {
@@ -110,43 +139,46 @@ impl Overlay {
         unsafe {
             if view == View::Hidden {
                 ShowWindow(self.hwnd, SW_HIDE);
-            } else if was == View::Hidden {
+                return;
+            }
+            if !matches!(was, View::Recording | View::Locked) {
                 self.levels = [0.0; BARS];
+            }
+            self.render(0.0);
+            if was == View::Hidden {
                 self.place();
-                self.render(0.0);
                 ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
-            } else {
-                self.render(0.0);
             }
         }
     }
 
-    /// Called by the animation timer. Returns false once hidden (timer can stop).
+    /// Called by the animation timer. Returns false when nothing animates (timer can stop).
     pub fn tick(&mut self, level: f32) -> bool {
-        if self.view == View::Hidden {
-            return false;
+        match self.view {
+            View::Recording | View::Locked | View::Transcribing => {
+                self.tick += 1;
+                self.render(level);
+                true
+            }
+            View::Flash if self.tick >= 30 => {
+                self.back_to_idle();
+                false
+            }
+            View::Flash => {
+                self.tick += 1;
+                true
+            }
+            View::Hidden | View::Idle(_) => false,
         }
-        self.tick += 1;
-        if self.view == View::Nothing && self.tick > 30 {
-            self.set(View::Hidden);
-            return false;
-        }
-        self.render(level);
-        true
     }
 
-    /// Bottom-center of the monitor the mouse is on.
-    unsafe fn place(&self) {
+    /// Bottom-center of the primary monitor's work area, just above the taskbar.
+    pub fn place(&self) {
         unsafe {
-            let mut pt = POINT { x: 0, y: 0 };
-            GetCursorPos(&mut pt);
-            let mon = MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY);
-            let mut mi: MONITORINFO = core::mem::zeroed();
-            mi.cbSize = size_of::<MONITORINFO>() as u32;
-            GetMonitorInfoW(mon, &mut mi);
-            let r = mi.rcWork;
-            let x = r.left + (r.right - r.left - self.w) / 2;
-            let y = r.bottom - self.h - (48.0 * self.s) as i32;
+            let mut r: RECT = core::mem::zeroed();
+            SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut r as *mut RECT as *mut core::ffi::c_void, 0);
+            let x = (r.left + r.right - self.w) / 2;
+            let y = r.bottom - self.h - (6.0 * self.s) as i32;
             SetWindowPos(self.hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
         }
     }
@@ -155,11 +187,21 @@ impl Overlay {
         let (w, h, s) = (self.w as f32, self.h as f32, self.s);
         let px = &mut self.pixmap;
         px.fill(tiny_skia::Color::TRANSPARENT);
-        fill(px, capsule(0.0, 0.0, w, h), BG);
         let (cy, r) = (h / 2.0, h / 2.0);
 
         match self.view {
+            View::Hidden => return,
+            View::Idle(_) | View::Flash => {
+                let color = match self.view {
+                    View::Flash => AMBER,
+                    View::Idle(Idle::Ready) => [250, 250, 250, 150],
+                    View::Idle(Idle::Loading) => [113, 113, 122, 150],
+                    _ => [245, 158, 11, 200], // Idle(Error)
+                };
+                fill(px, capsule(w / 2.0 - 18.0 * s, h - 5.0 * s, 36.0 * s, 5.0 * s), color);
+            }
             View::Recording | View::Locked => {
+                fill(px, capsule(0.0, 0.0, w, h), BG);
                 let dot = if self.view == View::Recording { RED } else { AMBER };
                 fill(px, circle(r, cy, 5.0 * s), dot);
                 self.levels.rotate_left(1);
@@ -179,13 +221,12 @@ impl Overlay {
                 }
             }
             View::Transcribing => {
+                fill(px, capsule(0.0, 0.0, w, h), BG);
                 for i in 0..3 {
                     let on = ((self.tick / 6) as i32 - i).rem_euclid(3) == 0;
                     fill(px, circle(w / 2.0 + (i - 1) as f32 * 14.0 * s, cy, 3.5 * s), if on { FG } else { DIM });
                 }
             }
-            View::Nothing => fill(px, capsule(w / 2.0 - 14.0 * s, cy - 1.5 * s, 28.0 * s, 3.0 * s), DIM),
-            View::Hidden => return,
         }
         self.present();
     }
@@ -214,38 +255,4 @@ impl Drop for Overlay {
             DestroyWindow(self.hwnd);
         }
     }
-}
-
-pub fn fill(px: &mut Pixmap, path: Path, c: [u8; 4]) {
-    let mut paint = Paint::default();
-    paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
-    paint.anti_alias = true;
-    px.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
-}
-
-pub fn circle(x: f32, y: f32, r: f32) -> Path {
-    PathBuilder::from_circle(x, y, r).unwrap_or_else(|| rect(x, y, 1.0, 1.0))
-}
-
-pub fn rect(x: f32, y: f32, w: f32, h: f32) -> Path {
-    PathBuilder::from_rect(tiny_skia::Rect::from_xywh(x, y, w.max(0.1), h.max(0.1)).unwrap())
-}
-
-/// Rectangle with fully rounded ends (radius = half the short side).
-pub fn capsule(x: f32, y: f32, w: f32, h: f32) -> Path {
-    let r = w.min(h) / 2.0;
-    let k = 0.5523 * r;
-    let (x1, y1) = (x + w, y + h);
-    let mut pb = PathBuilder::new();
-    pb.move_to(x + r, y);
-    pb.line_to(x1 - r, y);
-    pb.cubic_to(x1 - r + k, y, x1, y + r - k, x1, y + r);
-    pb.line_to(x1, y1 - r);
-    pb.cubic_to(x1, y1 - r + k, x1 - r + k, y1, x1 - r, y1);
-    pb.line_to(x + r, y1);
-    pb.cubic_to(x + r - k, y1, x, y1 - r + k, x, y1 - r);
-    pb.line_to(x, y + r);
-    pb.cubic_to(x, y + r - k, x + r - k, y, x + r, y);
-    pb.close();
-    pb.finish().unwrap_or_else(|| rect(x, y, w, h))
 }
