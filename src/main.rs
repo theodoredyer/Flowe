@@ -1,0 +1,460 @@
+//! parakey: hold Ctrl+Win, talk, let go -> local Parakeet transcribes, copies and pastes.
+#![windows_subsystem = "windows"]
+
+mod asr;
+mod audio;
+mod history;
+mod hotkey;
+mod overlay;
+mod tray;
+mod ui;
+mod win;
+
+use std::cell::RefCell;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+use windows_sys::Win32::Foundation::*;
+use windows_sys::Win32::Graphics::Gdi::HDC;
+use windows_sys::Win32::UI::Controls::{NM_DBLCLK, NMHDR};
+use windows_sys::Win32::UI::HiDpi::*;
+use windows_sys::Win32::UI::Shell::ShellExecuteW;
+use windows_sys::Win32::UI::WindowsAndMessaging::*;
+
+use history::{Entry, History};
+use hotkey::Action;
+use overlay::{Overlay, View};
+use tray::{Status, Tray};
+use ui::Ui;
+use win::wide;
+
+const WM_ACTION: u32 = WM_APP + 1; // wparam: hotkey::Action
+const WM_ASR: u32 = WM_APP + 2; // "there's something on the results channel"
+const WM_TRAY: u32 = WM_APP + 3;
+const WM_AUTOSTOP: u32 = WM_APP + 4;
+const TIMER_ANIM: usize = 1;
+const TIMER_FLASH: usize = 2;
+const MIN_HOLD: Duration = Duration::from_millis(300);
+const ID_QUIT: usize = 1;
+const ID_LOG: usize = 2;
+const ID_OPEN: usize = 3;
+const ID_TOGGLE: usize = 4;
+const TIP_READY: &str = "parakey - Ctrl+Win to talk, +Space to lock";
+
+enum AsrMsg {
+    Ready,
+    LoadFailed,
+    Transcribed(Entry),
+    Empty,
+    Failed,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Model {
+    Loading,
+    Ready,
+    Failed,
+}
+
+struct App {
+    hwnd: HWND,
+    recorder: audio::Recorder,
+    overlay: Overlay,
+    tray: Tray,
+    ui: Ui,
+    history: History,
+    jobs: mpsc::Sender<(Vec<f32>, u32)>,
+    results: mpsc::Receiver<AsrMsg>,
+    model: Model,
+    recording: bool,
+    paused: bool,
+    started: Instant,
+    taskbar_created: u32,
+}
+
+thread_local! {
+    static APP: RefCell<Option<App>> = const { RefCell::new(None) };
+}
+
+fn with_app(f: impl FnOnce(&mut App)) {
+    APP.with(|a| {
+        if let Ok(mut a) = a.try_borrow_mut()
+            && let Some(app) = a.as_mut()
+        {
+            f(app)
+        }
+    });
+}
+
+impl App {
+    fn animate(&self) {
+        unsafe { SetTimer(self.hwnd, TIMER_ANIM, 33, None) };
+    }
+
+    /// Push the current state to the tray icon, tooltip and window header.
+    fn sync(&mut self) {
+        let (status, tip, text, button) = if self.paused {
+            (Status::Paused, "parakey - paused", "Paused. Ctrl+Win does nothing until you resume.", "Resume")
+        } else if self.recording {
+            (Status::Recording, TIP_READY, "Recording…", "Pause")
+        } else {
+            match self.model {
+                Model::Loading => (Status::Loading, "parakey - loading model...", "Loading the speech model…", "Pause"),
+                Model::Failed => (Status::Error, "parakey - model failed to load (see log)", "The speech model failed to load. Open the log from the tray menu.", "Pause"),
+                Model::Ready => (Status::Ready, TIP_READY, "Listening. Hold Ctrl+Win to talk; tap Space while holding to lock.", "Pause"),
+            }
+        };
+        self.tray.set(status, Some(tip));
+        self.ui.set_status(text, button);
+    }
+
+    fn set_paused(&mut self, paused: bool) {
+        if self.paused == paused {
+            return;
+        }
+        if paused && self.recording {
+            self.on_action(Action::Cancel);
+        }
+        self.paused = paused;
+        hotkey::set_enabled(!paused);
+        self.sync();
+    }
+
+    fn on_action(&mut self, action: Action) {
+        match action {
+            Action::Start => {
+                let hwnd = self.hwnd as usize;
+                let on_full = move || unsafe {
+                    PostMessageW(hwnd as HWND, WM_AUTOSTOP, 0, 0);
+                };
+                if let Err(e) = self.recorder.start(on_full) {
+                    win::log(&format!("mic error: {e}"));
+                    if let Ok(mut c) = hotkey::COMBO.lock() {
+                        c.reset();
+                    }
+                    self.overlay.set(View::Nothing);
+                    self.animate();
+                    return;
+                }
+                self.recording = true;
+                self.started = Instant::now();
+                self.overlay.set(View::Recording);
+                self.animate();
+            }
+            Action::Lock => self.overlay.set(View::Locked),
+            Action::Stop => self.stop(),
+            Action::Cancel => {
+                self.recording = false;
+                drop(self.recorder.stop());
+                self.overlay.set(View::Hidden);
+            }
+        }
+        self.sync();
+    }
+
+    fn stop(&mut self) {
+        if !self.recording {
+            return;
+        }
+        self.recording = false;
+        let (audio, rate) = self.recorder.stop();
+        win::log(&format!("stop: {:.1}s audio, level {:.3}", audio.len() as f32 / rate as f32, audio::rms(&audio)));
+        let too_short = self.started.elapsed() < MIN_HOLD || audio.len() < rate as usize * 3 / 10;
+        if self.model == Model::Failed {
+            // Nobody will ever consume the job; don't let recordings pile up in memory.
+            self.overlay.set(View::Nothing);
+            self.animate();
+        } else if too_short || self.jobs.send((audio, rate)).is_err() {
+            self.overlay.set(View::Hidden);
+        } else {
+            self.overlay.set(View::Transcribing);
+        }
+        self.sync();
+    }
+
+    fn on_asr(&mut self) {
+        while let Ok(msg) = self.results.try_recv() {
+            match msg {
+                AsrMsg::Ready => self.model = Model::Ready,
+                AsrMsg::LoadFailed => self.model = Model::Failed,
+                AsrMsg::Transcribed(entry) => {
+                    self.ui.prepend(&entry);
+                    self.history.push(entry);
+                    self.ui.set_stats(&self.history);
+                    if !self.recording {
+                        self.overlay.set(View::Hidden);
+                    }
+                }
+                AsrMsg::Empty | AsrMsg::Failed => {
+                    if !self.recording {
+                        self.overlay.set(View::Nothing);
+                        self.animate();
+                    }
+                }
+            }
+        }
+        self.sync();
+    }
+
+    fn copy_selected(&mut self) {
+        if let Some(text) = self.ui.selected_text()
+            && !text.is_empty()
+            && win::set_clipboard(self.hwnd, &text)
+        {
+            self.ui.set_status("Copied to clipboard.", if self.paused { "Resume" } else { "Pause" });
+            unsafe { SetTimer(self.hwnd, TIMER_FLASH, 1500, None) };
+        }
+    }
+
+    fn clear_history(&mut self) {
+        self.history.clear();
+        self.ui.rebuild(&self.history);
+    }
+}
+
+/// Right-click tray menu. Runs a modal loop, so it must be called without holding the APP borrow.
+fn show_menu(hwnd: HWND, paused: bool) -> usize {
+    unsafe {
+        let menu = CreatePopupMenu();
+        let items = [
+            (ID_OPEN, "Open parakey"),
+            (ID_TOGGLE, if paused { "Resume listening" } else { "Pause listening" }),
+            (ID_LOG, "Open log"),
+            (ID_QUIT, "Quit"),
+        ];
+        for (i, (id, label)) in items.iter().enumerate() {
+            if i == 2 {
+                AppendMenuW(menu, MF_SEPARATOR, 0, core::ptr::null());
+            }
+            let label = wide(label);
+            AppendMenuW(menu, MF_STRING, *id, label.as_ptr());
+        }
+        SetMenuDefaultItem(menu, ID_OPEN as u32, 0);
+        let mut pt = POINT { x: 0, y: 0 };
+        GetCursorPos(&mut pt);
+        SetForegroundWindow(hwnd); // so the menu closes when clicking elsewhere
+        let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, core::ptr::null());
+        DestroyMenu(menu);
+        cmd as usize
+    }
+}
+
+fn open_log() {
+    unsafe {
+        let path = wide(&win::data_dir().join("parakey.log").to_string_lossy());
+        let open = wide("open");
+        ShellExecuteW(core::ptr::null_mut(), open.as_ptr(), path.as_ptr(), core::ptr::null(), core::ptr::null(), SW_SHOWNORMAL);
+    }
+}
+
+fn run_command(hwnd: HWND, cmd: usize) {
+    match cmd {
+        ID_OPEN => with_app(|app| app.ui.show()),
+        ID_TOGGLE | ui::ID_PAUSE => with_app(|app| app.set_paused(!app.paused)),
+        ID_LOG => open_log(),
+        ID_QUIT => unsafe {
+            DestroyWindow(hwnd);
+        },
+        ui::ID_CLEAR => {
+            let yes = unsafe {
+                MessageBoxW(hwnd, wide("Delete all recording history and stats?").as_ptr(), wide("parakey").as_ptr(), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2)
+            };
+            if yes == IDYES {
+                with_app(|app| app.clear_history());
+            }
+        }
+        _ => {}
+    }
+}
+
+unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match msg {
+        WM_ACTION => {
+            if let Some(a) = Action::from_wparam(wparam) {
+                with_app(|app| app.on_action(a));
+            }
+        }
+        WM_AUTOSTOP => {
+            if let Ok(mut c) = hotkey::COMBO.lock() {
+                c.reset();
+            }
+            with_app(|app| app.stop());
+        }
+        WM_ASR => with_app(|app| app.on_asr()),
+        WM_TIMER if wparam == TIMER_ANIM => with_app(|app| {
+            if !app.overlay.tick(app.recorder.level()) {
+                unsafe { KillTimer(hwnd, TIMER_ANIM) };
+            }
+        }),
+        WM_TIMER if wparam == TIMER_FLASH => {
+            unsafe { KillTimer(hwnd, TIMER_FLASH) };
+            with_app(|app| app.sync());
+        }
+        WM_TRAY => match (lparam & 0xFFFF) as u32 {
+            WM_LBUTTONUP => run_command(hwnd, ID_OPEN),
+            WM_RBUTTONUP => {
+                let mut paused = false;
+                with_app(|app| paused = app.paused);
+                let cmd = show_menu(hwnd, paused);
+                run_command(hwnd, cmd);
+            }
+            _ => {}
+        },
+        WM_COMMAND => run_command(hwnd, wparam & 0xFFFF),
+        WM_NOTIFY => {
+            // SAFETY: WM_NOTIFY's lparam always points to an NMHDR.
+            let nm = unsafe { &*(lparam as *const NMHDR) };
+            if nm.idFrom == ui::ID_LIST && nm.code == NM_DBLCLK {
+                with_app(|app| app.copy_selected());
+            }
+        }
+        WM_SIZE => with_app(|app| app.ui.layout()),
+        WM_GETMINMAXINFO => {
+            let mut size = (0, 0);
+            with_app(|app| size = app.ui.min_size());
+            if size.0 > 0 {
+                // SAFETY: WM_GETMINMAXINFO's lparam points to a MINMAXINFO.
+                let mmi = unsafe { &mut *(lparam as *mut MINMAXINFO) };
+                mmi.ptMinTrackSize = POINT { x: size.0, y: size.1 };
+            }
+        }
+        WM_CTLCOLORSTATIC => {
+            let mut brush = core::ptr::null_mut();
+            with_app(|app| brush = app.ui.static_brush(wparam as HDC));
+            if !brush.is_null() {
+                return brush as LRESULT;
+            }
+            return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+        }
+        WM_CLOSE => unsafe {
+            ShowWindow(hwnd, SW_HIDE); // keep running in the tray
+        },
+        WM_DESTROY => {
+            APP.with(|a| a.borrow_mut().take()); // drops tray icon, overlay, mic
+            unsafe { PostQuitMessage(0) };
+        }
+        _ => {
+            let mut handled = false;
+            with_app(|app| {
+                if msg == app.taskbar_created {
+                    app.tray.add();
+                    handled = true;
+                }
+            });
+            if !handled {
+                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            }
+        }
+    }
+    0
+}
+
+fn asr_thread(hwnd: usize, jobs: mpsc::Receiver<(Vec<f32>, u32)>, results: mpsc::Sender<AsrMsg>) {
+    let post = |msg: AsrMsg| {
+        let _ = results.send(msg);
+        unsafe { PostMessageW(hwnd as HWND, WM_ASR, 0, 0) };
+    };
+    let dir = win::data_dir().join("model");
+    let missing: Vec<_> = asr::MODEL_FILES.iter().filter(|f| !dir.join(f).exists()).collect();
+    if !missing.is_empty() {
+        win::log(&format!("model files missing from {}: {missing:?} (run download-model.ps1)", dir.display()));
+        post(AsrMsg::LoadFailed);
+        return;
+    }
+    let t = Instant::now();
+    let mut model = match asr::Parakeet::load(&dir) {
+        Ok(m) => m,
+        Err(e) => {
+            win::log(&format!("model load failed: {e}"));
+            post(AsrMsg::LoadFailed);
+            return;
+        }
+    };
+    let _ = model.transcribe(&vec![0.0; 16000]); // warm-up
+    win::log(&format!("model ready in {:.1}s", t.elapsed().as_secs_f32()));
+    post(AsrMsg::Ready);
+
+    for (audio, rate) in jobs {
+        let t = Instant::now();
+        let audio = audio::resample(&audio, rate, 16000);
+        let audio_ms = (audio.len() as u64 * 1000 / 16000) as u32;
+        match model.transcribe(&audio) {
+            Ok(text) if !text.is_empty() => {
+                let latency_ms = t.elapsed().as_millis() as u32;
+                // The log only gets numbers; the text itself goes to history.tsv.
+                win::log(&format!("{:.1}s audio -> {latency_ms}ms, {} chars", audio_ms as f32 / 1000.0, text.len()));
+                post(AsrMsg::Transcribed(Entry::new(text.clone(), audio_ms, latency_ms)));
+                // With a fake mic (dev testing) only the clipboard is set: never type into whatever is focused.
+                let fake_mic = std::env::var_os("PARAKEY_FAKE_MIC").is_some();
+                if win::set_clipboard(hwnd as HWND, &(text + " ")) && !fake_mic {
+                    win::wait_modifiers_released();
+                    win::send_paste();
+                }
+            }
+            Ok(_) => {
+                win::log(&format!("{:.1}s audio -> empty", audio_ms as f32 / 1000.0));
+                post(AsrMsg::Empty);
+            }
+            Err(e) => {
+                win::log(&format!("transcription failed: {e}"));
+                post(AsrMsg::Failed);
+            }
+        }
+    }
+}
+
+fn main() {
+    let _ = std::fs::create_dir_all(win::data_dir());
+    if !win::single_instance() {
+        return;
+    }
+    win::log("starting");
+    unsafe {
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_SYSTEM_AWARE);
+        let Some(ui) = Ui::new(Some(wndproc)) else {
+            win::log("failed to create window");
+            return;
+        };
+        let hwnd = ui.hwnd;
+        let Some(overlay) = Overlay::new() else {
+            win::log("failed to create overlay");
+            return;
+        };
+        let taskbar_created = RegisterWindowMessageW(wide("TaskbarCreated").as_ptr());
+        let (jobs_tx, jobs_rx) = mpsc::channel();
+        let (res_tx, res_rx) = mpsc::channel();
+        let h = hwnd as usize;
+        if std::thread::Builder::new().name("asr".into()).spawn(move || asr_thread(h, jobs_rx, res_tx)).is_err() {
+            win::log("failed to start asr thread");
+            return;
+        }
+        let history = History::load();
+        ui.rebuild(&history);
+        APP.with(|a| {
+            *a.borrow_mut() = Some(App {
+                hwnd,
+                recorder: audio::Recorder::new(),
+                overlay,
+                tray: Tray::new(hwnd, WM_TRAY),
+                ui,
+                history,
+                jobs: jobs_tx,
+                results: res_rx,
+                model: Model::Loading,
+                recording: false,
+                paused: false,
+                started: Instant::now(),
+                taskbar_created,
+            })
+        });
+        with_app(|app| app.sync());
+        hotkey::install(hwnd, WM_ACTION);
+
+        let mut m: MSG = core::mem::zeroed();
+        while GetMessageW(&mut m, core::ptr::null_mut(), 0, 0) > 0 {
+            TranslateMessage(&m);
+            DispatchMessageW(&m);
+        }
+    }
+    win::log("exiting");
+}
