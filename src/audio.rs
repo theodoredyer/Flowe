@@ -1,6 +1,6 @@
 //! Microphone capture. The device is only opened while recording, so idle costs nothing.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -13,6 +13,8 @@ struct Shared {
     buf: Mutex<Vec<f32>>,
     level: AtomicU32, // f32 bits, RMS of the latest callback
     full: AtomicBool,
+    /// Samples still to discard (while one of our own sounds is playing).
+    skip: AtomicUsize,
 }
 
 pub struct Recorder {
@@ -58,14 +60,18 @@ impl Recorder {
         self.shared.full.store(false, Ordering::Relaxed);
 
         let shared = self.shared.clone();
-        // Drop the first `guard_ms` of input: that is when the start chime is playing.
-        let mut skip = (self.rate as u64 * guard_ms as u64 / 1000) as usize;
-        let mut push = move |mono: &mut dyn Iterator<Item = f32>| {
-            while skip > 0 {
-                if mono.next().is_none() {
+        // Drop the first `guard_ms` of input: that is when the start sound is playing.
+        self.mute(guard_ms);
+        let push = move |mono: &mut dyn Iterator<Item = f32>| {
+            let mut skip = shared.skip.load(Ordering::Relaxed);
+            if skip > 0 {
+                while skip > 0 && mono.next().is_some() {
+                    skip -= 1;
+                }
+                shared.skip.store(skip, Ordering::Relaxed);
+                if skip > 0 {
                     return;
                 }
-                skip -= 1;
             }
             let Ok(mut buf) = shared.buf.lock() else { return };
             let start = buf.len();
@@ -107,6 +113,11 @@ impl Recorder {
         stream.play().map_err(|e| e.to_string())?;
         self.stream = Some(stream);
         Ok(())
+    }
+
+    /// Discards the next `ms` of mic input (so our own sounds are not transcribed).
+    pub fn mute(&self, ms: u32) {
+        self.shared.skip.store((self.rate as u64 * ms as u64 / 1000) as usize, Ordering::Relaxed);
     }
 
     /// Closes the mic and hands back (samples, sample_rate).

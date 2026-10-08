@@ -72,7 +72,7 @@ impl Overlay {
     pub fn new(style: Style) -> Option<Self> {
         unsafe {
             let s = GetDpiForSystem() as f32 / 96.0;
-            let (w, h) = ((220.0 * s) as i32, (44.0 * s) as i32);
+            let (w, h) = ((168.0 * s) as i32, (34.0 * s) as i32);
             let class = wide("flowe-overlay");
             let wc = WNDCLASSW {
                 lpfnWndProc: Some(DefWindowProcW),
@@ -116,8 +116,8 @@ impl Overlay {
             SelectObject(memdc, dib);
             // Left: a square slot for the state indicator. Right: the visualization inset.
             let (wf, hf) = (w as f32, h as f32);
-            let pad = 7.0 * s;
-            let ax = hf * 0.92;
+            let pad = 3.0 * s; // thin bezel around the visualization
+            let ax = hf * 0.80;
             let area = Area { x: ax, y: pad, w: wf - ax - pad, h: hf - 2.0 * pad };
             let mut mask = Mask::new(w as u32, h as u32)?;
             mask.fill_path(&capsule(area.x, area.y, area.w, area.h), tiny_skia::FillRule::Winding, true, Transform::identity());
@@ -252,25 +252,25 @@ impl Overlay {
                 fill(px, capsule(a.x, a.y, a.w, a.h), WELL);
                 self.viz.render(px, &self.mask, a, s);
                 // State indicator, centred in the left slot.
-                let (cx, cy) = (a.x / 2.0 + 1.0 * s, h / 2.0);
+                let (cx, cy) = (a.x / 2.0 + 0.5 * s, h / 2.0);
                 if self.view == View::Recording {
-                    let halo = 5.0 * s + 5.0 * s * self.viz.energy;
+                    let halo = 3.5 * s + 3.5 * s * self.viz.energy;
                     fill(px, circle(cx, cy, halo), [239, 68, 68, (40.0 + 60.0 * self.viz.energy) as u8]);
-                    fill(px, circle(cx, cy, 5.0 * s), RED);
+                    fill(px, circle(cx, cy, 3.5 * s), RED);
                 } else {
-                    let hole = [20, 20, 23, 255];
-                    fill(px, capsule(cx - 3.6 * s, cy - 8.0 * s, 7.2 * s, 10.0 * s), AMBER); // shackle
-                    fill(px, capsule(cx - 2.0 * s, cy - 6.4 * s, 4.0 * s, 8.0 * s), hole);
-                    fill(px, rect(cx - 5.0 * s, cy - 2.5 * s, 10.0 * s, 8.0 * s), AMBER); // body
+                    let (hole, k) = ([20, 20, 23, 255], 0.75 * s);
+                    fill(px, capsule(cx - 3.6 * k, cy - 8.0 * k, 7.2 * k, 10.0 * k), AMBER); // shackle
+                    fill(px, capsule(cx - 2.0 * k, cy - 6.4 * k, 4.0 * k, 8.0 * k), hole);
+                    fill(px, rect(cx - 5.0 * k, cy - 2.5 * k, 10.0 * k, 8.0 * k), AMBER); // body
                 }
             }
             View::Transcribing => {
-                let (pw, ph) = (128.0 * s, 34.0 * s);
+                let (pw, ph) = (96.0 * s, h);
                 let (x0, y0) = ((w - pw) / 2.0, (h - ph) / 2.0);
                 fill(px, capsule(x0, y0, pw, ph), BG);
                 for i in 0..3 {
                     let on = ((self.tick / 12) as i32 - i).rem_euclid(3) == 0;
-                    fill(px, circle(w / 2.0 + (i - 1) as f32 * 14.0 * s, h / 2.0, 3.5 * s), if on { FG } else { DIM });
+                    fill(px, circle(w / 2.0 + (i - 1) as f32 * 11.0 * s, h / 2.0, 3.0 * s), if on { FG } else { DIM });
                 }
             }
         }

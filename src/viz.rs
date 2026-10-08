@@ -76,7 +76,28 @@ pub struct Viz {
     fill: f32,
     drops: Vec<Droplet>,
     rng: u32,
+    /// Background-noise level the gate subtracts (tracks the quietest recent input).
+    floor: f32,
+    /// Plasma colour scheme for this recording (index into PALETTES).
+    palette: usize,
 }
+
+/// Plasma colour schemes; a different one is picked for each recording.
+/// Cyclic 4-colour ramps (the 5th stop repeats the 1st), rgb 0..1.
+const PALETTES: [[[f32; 3]; 5]; 6] = [
+    // neon: indigo, violet, magenta, cyan
+    [[0.10, 0.06, 0.32], [0.42, 0.20, 0.86], [0.93, 0.28, 0.66], [0.16, 0.78, 0.92], [0.10, 0.06, 0.32]],
+    // sunset: plum, berry, coral, amber
+    [[0.16, 0.05, 0.22], [0.55, 0.10, 0.45], [0.95, 0.30, 0.30], [1.00, 0.65, 0.20], [0.16, 0.05, 0.22]],
+    // ocean: navy, blue, teal, seafoam
+    [[0.02, 0.08, 0.22], [0.05, 0.35, 0.60], [0.10, 0.75, 0.80], [0.55, 0.95, 0.85], [0.02, 0.08, 0.22]],
+    // aurora: night, emerald, lime, periwinkle
+    [[0.03, 0.10, 0.12], [0.05, 0.55, 0.40], [0.45, 0.90, 0.45], [0.30, 0.45, 0.95], [0.03, 0.10, 0.12]],
+    // candy: grape, pink, peach, sky
+    [[0.30, 0.12, 0.45], [0.95, 0.45, 0.70], [1.00, 0.75, 0.55], [0.55, 0.75, 1.00], [0.30, 0.12, 0.45]],
+    // ember: char, crimson, orange, gold
+    [[0.10, 0.02, 0.02], [0.60, 0.08, 0.05], [0.95, 0.40, 0.08], [1.00, 0.85, 0.40], [0.10, 0.02, 0.02]],
+];
 
 impl Viz {
     pub fn new(style: Style) -> Self {
@@ -94,25 +115,39 @@ impl Viz {
             fill: 0.3,
             drops: Vec::new(),
             rng: 0x9E37_79B9,
+            floor: 0.04,
+            palette: 0,
         }
     }
 
-    /// Calm state for a fresh recording.
+    /// Calm state for a fresh recording, with a new plasma palette (never the same twice in a row).
     pub fn reset(&mut self) {
-        let style = self.style;
-        let rng = self.rng;
+        let (style, rng, floor, prev) = (self.style, self.rng, self.floor, self.palette);
         *self = Self::new(style);
         self.rng = rng;
+        self.floor = floor; // the room's noise level carries over between recordings
+        let others = PALETTES.len() - 1;
+        let pick = (self.rand() * others as f32) as usize % others;
+        self.palette = if pick >= prev { pick + 1 } else { pick };
     }
 
     pub fn update(&mut self, level: f32, dt: f32) {
-        self.target = (level * 10.0).min(1.0);
+        // Noise gate: follow the quietest input (drops instantly, creeps up slowly) and only
+        // count what rises above it, so the visuals go still the moment you stop talking.
+        if level < self.floor {
+            self.floor = level;
+        } else {
+            self.floor = (self.floor + (level - self.floor) * 0.002).min(0.04);
+        }
+        let voice = (level - self.floor * 1.3 - 0.002).max(0.0);
+        self.target = (voice * 12.0).min(1.0);
         let prev = self.energy;
-        let k = if self.target > self.energy { 0.4 } else { 0.05 };
+        let k = if self.target > self.energy { 0.4 } else { 0.1 };
         self.energy += (self.target - self.energy) * k;
         self.onset = (self.target - prev).max(0.0);
         self.t += dt;
-        self.phase += dt * (0.5 + 3.0 * self.energy);
+        // Patterns barely drift in silence and speed up a lot while you talk.
+        self.phase += dt * (0.08 + 3.4 * self.energy);
         self.frame = self.frame.wrapping_add(1);
     }
 
@@ -286,12 +321,13 @@ impl Viz {
         let (cw, ch) = (a.w / s, a.h / s);
         let cx = cw * (0.5 + 0.35 * (t * 0.6).sin());
         let cy = ch * (0.5 + 0.4 * (t * 0.8).cos());
+        let palette = &PALETTES[self.palette];
         shade(px, mask, a, |x, y| {
             let (u, v) = ((x - a.x) / s, (y - a.y) / s);
             let mut f = (u * 0.06 + t * 1.3).sin() + (v * 0.11 - t * 0.9).sin() + ((u + v) * 0.045 + t * 0.7).sin();
             f += (((u - cx).powi(2) + (v - cy).powi(2)).sqrt() * 0.13 - t * 1.6).sin();
             // A curated cyclic ramp rather than a full rainbow.
-            let mut c = ramp(f * 0.125 + 0.5 + drift);
+            let mut c = ramp(palette, f * 0.125 + 0.5 + drift);
             let l = (c[0] + c[1] + c[2]) / 3.0;
             for v in &mut c {
                 *v = ((l + (*v - l) * sat - 0.5) * contrast + 0.5) * bright;
@@ -371,14 +407,13 @@ fn shade(px: &mut Pixmap, mask: &Mask, a: Area, mut f: impl FnMut(f32, f32) -> (
     }
 }
 
-/// Cyclic colour ramp for the plasma: deep indigo -> violet -> magenta -> cyan -> back.
-fn ramp(k: f32) -> [f32; 3] {
-    const STOPS: [[f32; 3]; 5] = [[0.10, 0.06, 0.32], [0.42, 0.20, 0.86], [0.93, 0.28, 0.66], [0.16, 0.78, 0.92], [0.10, 0.06, 0.32]];
+/// Samples a cyclic 4-colour ramp (see PALETTES) at `k`, with smooth blends between stops.
+fn ramp(stops: &[[f32; 3]; 5], k: f32) -> [f32; 3] {
     let k = k.rem_euclid(1.0) * 4.0;
     let i = (k as usize).min(3);
     let t = k - i as f32;
     let t = t * t * (3.0 - 2.0 * t);
-    [0, 1, 2].map(|j| STOPS[i][j] + (STOPS[i + 1][j] - STOPS[i][j]) * t)
+    [0, 1, 2].map(|j| stops[i][j] + (stops[i + 1][j] - stops[i][j]) * t)
 }
 
 fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
@@ -462,6 +497,36 @@ mod tests {
         }
         assert!(v.height.iter().all(|h| h.is_finite() && h.abs() <= a.h * 0.45 + 0.01));
         assert!(v.drops.len() <= 24);
+    }
+
+    #[test]
+    fn goes_still_when_you_stop_talking() {
+        let mut v = Viz::new(Style::Waves);
+        let mut run = |v: &mut Viz, level: f32, secs: f32| {
+            for _ in 0..(secs * 60.0) as usize {
+                v.update(level, 1.0 / 60.0);
+            }
+        };
+        run(&mut v, 0.012, 2.0); // room noise: learned as the floor
+        assert_eq!(v.target, 0.0, "background noise must not move the bars");
+        run(&mut v, 0.08, 1.0); // talking
+        assert!(v.energy > 0.5);
+        run(&mut v, 0.012, 0.5); // stop talking
+        assert_eq!(v.target, 0.0);
+        assert!(v.energy < 0.05, "still moving after 0.5 s of silence: {}", v.energy);
+    }
+
+    #[test]
+    fn plasma_palette_changes_every_recording() {
+        let mut v = Viz::new(Style::Plasma);
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..40 {
+            let before = v.palette;
+            v.reset();
+            assert_ne!(v.palette, before);
+            seen.insert(v.palette);
+        }
+        assert_eq!(seen.len(), PALETTES.len(), "every palette should come up");
     }
 
     #[test]

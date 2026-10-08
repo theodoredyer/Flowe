@@ -164,7 +164,11 @@ impl App {
                 self.overlay.set(View::Recording);
                 self.animate();
             }
-            Action::Lock => self.overlay.set(View::Locked),
+            Action::Lock => {
+                let guard = sound::lock();
+                self.recorder.mute(guard);
+                self.overlay.set(View::Locked);
+            }
             Action::Stop => self.stop(),
             Action::Cancel => {
                 self.recording = false;

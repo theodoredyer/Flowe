@@ -13,6 +13,9 @@ const START_GUARD_MS: u32 = 150;
 /// (length ms, start Hz, end Hz, where the swell peaks 0..1)
 const START: (u32, f32, f32, f32) = (170, 350.0, 2600.0, 0.55);
 const STOP: (u32, f32, f32, f32) = (200, 2400.0, 320.0, 0.35);
+/// Space pressed to lock hands-free: a quick bright puff, shorter and higher than the others.
+const LOCK: (u32, f32, f32, f32) = (70, 2200.0, 5200.0, 0.25);
+const LOCK_GUARD_MS: u32 = 90;
 
 static USER_ON: AtomicBool = AtomicBool::new(true);
 
@@ -41,6 +44,13 @@ pub fn start() {
 pub fn stop() {
     static WAV: OnceLock<Vec<u8>> = OnceLock::new();
     play(WAV.get_or_init(|| wav(&whoosh(STOP))));
+}
+
+/// Plays the lock sound; returns how much mic input to discard while it plays (0 when silent).
+pub fn lock() -> u32 {
+    static WAV: OnceLock<Vec<u8>> = OnceLock::new();
+    play(WAV.get_or_init(|| wav(&whoosh(LOCK))));
+    if enabled() { LOCK_GUARD_MS } else { 0 }
 }
 
 fn play(wav: &'static [u8]) {
@@ -114,7 +124,7 @@ mod tests {
 
     #[test]
     fn whooshes_are_valid_quiet_and_click_free() {
-        for spec in [START, STOP] {
+        for spec in [START, STOP, LOCK] {
             let s = whoosh(spec);
             let peak = s.iter().fold(0.0f32, |m, v| m.max(v.abs()));
             assert!((peak - VOLUME).abs() < 1e-3, "peak {peak}");
@@ -136,10 +146,15 @@ mod tests {
     }
 
     #[test]
+    fn lock_sound_fits_inside_its_mic_guard() {
+        assert!(LOCK.0 + 10 <= LOCK_GUARD_MS, "lock sound (+10 ms tail) outlasts its guard");
+    }
+
+    #[test]
     fn sweeps_go_the_right_way() {
         // Rough spectral centroid via zero crossings: start rises, stop falls.
         let zc = |v: &[f32]| v.windows(2).filter(|w| (w[0] < 0.0) != (w[1] < 0.0)).count();
-        for (spec, rising) in [(START, true), (STOP, false)] {
+        for (spec, rising) in [(START, true), (STOP, false), (LOCK, true)] {
             let s = whoosh(spec);
             let (a, b) = s.split_at(s.len() / 2);
             assert_eq!(zc(b) > zc(a), rising, "{spec:?}");
