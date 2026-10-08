@@ -1,4 +1,4 @@
-//! Regenerates assets/parakey.ico from the same badge drawing the app uses for its tray icon:
+//! Regenerates assets/fleow.ico from the same badge drawing the app uses for its tray icon:
 //! `cargo run --release --bin mkicon`
 #![allow(dead_code)] // draw.rs has helpers only the main app uses
 
@@ -45,6 +45,6 @@ fn main() {
     out.extend_from_slice(&(sizes.len() as u16).to_le_bytes());
     out.extend_from_slice(&dir);
     out.extend_from_slice(&data);
-    std::fs::write("assets/parakey.ico", &out).expect("write assets/parakey.ico");
-    println!("wrote assets/parakey.ico ({} bytes, {} sizes)", out.len(), sizes.len());
+    std::fs::write("assets/fleow.ico", &out).expect("write assets/fleow.ico");
+    println!("wrote assets/fleow.ico ({} bytes, {} sizes)", out.len(), sizes.len());
 }

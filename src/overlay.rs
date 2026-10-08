@@ -1,5 +1,5 @@
 //! Bottom-center indicator, click-through, never takes focus.
-//! Idle: a tiny dash just above the taskbar meaning "parakey is listening". Recording: a pill
+//! Idle: a tiny dash just above the taskbar meaning "Fleow is listening". Recording: a pill
 //! with a level meter. Static states are drawn once and cost nothing; only the animated ones
 //! run a timer.
 
@@ -61,7 +61,7 @@ impl Overlay {
         unsafe {
             let s = GetDpiForSystem() as f32 / 96.0;
             let (w, h) = ((128.0 * s) as i32, (34.0 * s) as i32);
-            let class = wide("parakey-overlay");
+            let class = wide("fleow-overlay");
             let wc = WNDCLASSW {
                 lpfnWndProc: Some(DefWindowProcW),
                 hInstance: GetModuleHandleW(core::ptr::null()),

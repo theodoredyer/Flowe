@@ -1,4 +1,4 @@
-//! Notification-area icon: the "P" badge. Dark = ready, red = recording, grey = loading,
+//! Notification-area icon: the "F" badge. Dark = ready, red = recording, grey = loading,
 //! amber = model error, faint = paused.
 
 use windows_sys::Win32::Foundation::*;
@@ -36,7 +36,7 @@ impl Tray {
             ([113, 113, 122, 255], 120), // paused
         ];
         let icons = styles.map(|(bg, alpha)| icon::badge(n, bg, alpha).map_or(core::ptr::null_mut(), hicon));
-        let mut t = Self { hwnd, msg, icons, status: Status::Loading, tip: "parakey - loading model...".into() };
+        let mut t = Self { hwnd, msg, icons, status: Status::Loading, tip: "Fleow - loading model...".into() };
         t.add();
         t
     }

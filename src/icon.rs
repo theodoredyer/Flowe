@@ -1,4 +1,4 @@
-//! The "P" badge: a rounded square with a bold white P. Used for the tray icon, the window
+//! The "F" badge: a rounded square with a bold white F. Used for the tray icon, the window
 //! icon and (via `cargo run --bin mkicon`) the exe icon, so they all match.
 
 use tiny_skia::Pixmap;
@@ -9,12 +9,12 @@ use crate::draw::{fill, rounded_rect};
 
 pub const INK: [u8; 4] = [24, 24, 27, 255];
 
-/// Rounded square of `bg` with a white P. `alpha` fades the whole badge (the "paused" look).
+/// Rounded square of `bg` with a white F. `alpha` fades the whole badge (the "paused" look).
 pub fn badge(size: u32, bg: [u8; 4], alpha: u8) -> Option<Pixmap> {
     let mut px = Pixmap::new(size, size)?;
     let s = size as f32;
     fill(&mut px, rounded_rect(0.0, 0.0, s, s, s * 0.24), bg);
-    let mask = glyph_mask("P", size as i32, (s * 0.80).round() as i32);
+    let mask = glyph_mask("F", size as i32, (s * 0.80).round() as i32);
     let data = px.data_mut();
     for (i, &a) in mask.iter().enumerate() {
         if a == 0 {

@@ -1,4 +1,4 @@
-# parakey
+# Fleow
 
 Local push-to-talk dictation for Windows, a stand-in for Wispr Flow / FluidVoice.
 Hold **Ctrl+Win**, talk, let go. The audio runs through NVIDIA's **Parakeet TDT 0.6B v2**
@@ -10,7 +10,7 @@ No cloud, no account, no usage limits.
 - Idle cost is zero: the mic is closed, no timers run, CPU sits at 0.00%. Only the keyboard
   hook is alive. Pausing removes even that.
 - A tiny dash just above the taskbar means it is listening; it grows into a level meter while
-  recording. A "P" badge sits in the tray, and the dashboard window (opens on launch, closing it
+  recording. An "F" badge sits in the tray, and the dashboard window (opens on launch, closing it
   only hides it) has pause/resume, your recording history and usage stats.
 
 ## Controls
@@ -21,7 +21,7 @@ No cloud, no account, no usage limits.
 | ...then tap **Space** | locks: keeps recording hands-free; press Ctrl+Win again to stop |
 | **Esc** while locked | cancels |
 | Ctrl+Win + any other key | cancels and passes through, so Ctrl+Win+Left etc still work |
-| Tray icon, left-click | opens the dashboard (so does launching parakey again) |
+| Tray icon, left-click | opens the dashboard (so does launching Fleow again) |
 | Tray icon, right-click | Open / Pause listening / Open log / Quit |
 
 Taps shorter than 0.3 s are ignored. A forgotten locked recording stops itself after 5 minutes.
@@ -34,27 +34,27 @@ Only building needs tools: `winget install Rustlang.Rustup Microsoft.VisualStudi
 
 ```powershell
 cargo build --release
-.\download-model.ps1   # 2.4 GB from Hugging Face -> %LOCALAPPDATA%\parakey\model
-.\install.ps1          # copies the exe to %LOCALAPPDATA%\parakey, adds a Start Menu entry, launches
+.\download-model.ps1   # 2.4 GB from Hugging Face -> %LOCALAPPDATA%\Fleow\model
+.\install.ps1          # copies the exe to %LOCALAPPDATA%\Fleow, adds a Start Menu entry, launches
 ```
 
-After that, press the Windows key and type "parakey" to start it. `.\install.ps1 -Startup` also
-launches it at sign-in, hidden in the tray (`parakey.exe --tray`); `.\install.ps1 -Uninstall`
+After that, press the Windows key and type "Fleow" to start it. `.\install.ps1 -Startup` also
+launches it at sign-in, hidden in the tray (`fleow.exe --tray`); `.\install.ps1 -Uninstall`
 removes the shortcuts. `cargo run --release --bin mkicon` regenerates the app icon. Quit Wispr Flow (or change
 its hotkey) first, or both apps will react to Ctrl+Win.
 
-## Files in `%LOCALAPPDATA%\parakey\`
+## Files in `%LOCALAPPDATA%\Fleow\`
 
 - `model\` — the ONNX model
 - `history.tsv` — your recordings: time, audio length, transcription time, word count, text.
   Plain text, so it is readable and greppable; "Clear history" deletes it.
-- `parakey.log` — timings and errors only, never transcript text
+- `fleow.log` — timings and errors only, never transcript text
 
 ## Notes
 
 - RAM sits around 400 MB while idle: that is the model staying loaded so transcription is
   instant. Transcribing a 10 s clip takes about 0.3 s on an RTX 4070.
-- Apps running as Administrator will not receive the paste unless parakey runs elevated too.
+- Apps running as Administrator will not receive the paste unless Fleow runs elevated too.
 - The dashboard is dark-only (custom drawn), with a dark title bar on Windows 11.
 - `assets/nemo128.onnx` (mel-spectrogram preprocessor) comes from
   [onnx-asr](https://github.com/istupakov/onnx-asr), MIT; the model export is

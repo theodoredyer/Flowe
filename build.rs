@@ -1,7 +1,7 @@
 fn main() {
-    println!("cargo:rerun-if-changed=assets/parakey.ico");
+    println!("cargo:rerun-if-changed=assets/fleow.ico");
     let mut res = winresource::WindowsResource::new();
-    res.set_icon("assets/parakey.ico"); // resource id 1, used for the window + taskbar too
+    res.set_icon("assets/fleow.ico"); // resource id 1, used for the window + taskbar too
     // Common Controls v6 = modern-looking buttons/list instead of Windows 95 ones.
     res.set_manifest(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>

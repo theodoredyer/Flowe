@@ -269,6 +269,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fleow"
+version = "0.2.0"
+dependencies = [
+ "cpal",
+ "ort",
+ "tiny-skia",
+ "windows-sys",
+ "winresource",
+]
+
+[[package]]
 name = "foreign-types"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -779,17 +790,6 @@ dependencies = [
  "hmac-sha256",
  "lzma-rust2",
  "ureq",
-]
-
-[[package]]
-name = "parakey"
-version = "0.2.0"
-dependencies = [
- "cpal",
- "ort",
- "tiny-skia",
- "windows-sys",
- "winresource",
 ]
 
 [[package]]

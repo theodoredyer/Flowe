@@ -160,7 +160,7 @@ impl Ui {
         unsafe {
             let hinst = GetModuleHandleW(core::ptr::null());
             let s = GetDpiForSystem() as f32 / 96.0;
-            let class = wide("parakey-main");
+            let class = wide("fleow-main");
             // Icon resource 1 is embedded by build.rs; null just means the default icon.
             let icon = LoadImageW(hinst, 1 as PCWSTR, IMAGE_ICON, 0, 0, LR_DEFAULTSIZE);
             let icon_sm = LoadImageW(hinst, 1 as PCWSTR, IMAGE_ICON, px(s, 16), px(s, 16), 0);
@@ -180,7 +180,7 @@ impl Ui {
             let hwnd = CreateWindowExW(
                 0,
                 class.as_ptr(),
-                wide("parakey").as_ptr(),
+                wide("Fleow").as_ptr(),
                 WS_OVERLAPPEDWINDOW,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
@@ -206,7 +206,7 @@ impl Ui {
                 font(s, 8.0, FW_NORMAL),
                 font(s, 10.5, FW_SEMIBOLD),
                 font(s, 12.0, FW_SEMIBOLD),
-                font(s, 26.0, FW_SEMIBOLD),
+                font(s, 22.0, FW_SEMIBOLD),
             ];
             Some(Self {
                 hwnd,
@@ -597,8 +597,8 @@ impl Ui {
             text(hdc, f[F_BODY], T_WHITE, &self.button_label, l.pause, L | DT_CENTER);
             for (i, (c, label)) in l.cards.iter().zip(["recordings", "words dictated", "of speech", "words / min"]).enumerate() {
                 let inner = c.inset(px(s, 14));
-                text(hdc, f[F_BIG], T_WHITE, &self.stats[i], R { h: px(s, 36), ..inner }, DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-                text(hdc, f[F_SMALL], T_GREY, label, R { y: inner.y + px(s, 38), h: px(s, 16), ..inner }, L);
+                text(hdc, f[F_BIG], T_WHITE, &self.stats[i], R { h: px(s, 40), ..inner }, DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+                text(hdc, f[F_SMALL], T_GREY, label, R { y: inner.y + px(s, 40), h: px(s, 16), ..inner }, L);
             }
             text(hdc, f[F_BODY], T_GREY, &self.today, l.today, L);
             text(hdc, f[F_TITLE], T_WHITE, "History", l.title, L);

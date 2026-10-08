@@ -1,4 +1,4 @@
-//! parakey: hold Ctrl+Win, talk, let go -> local Parakeet transcribes, copies and pastes.
+//! fleow: hold Ctrl+Win, talk, let go -> local Parakeet transcribes, copies and pastes.
 #![windows_subsystem = "windows"]
 
 mod asr;
@@ -42,9 +42,9 @@ const ID_QUIT: usize = 1;
 const ID_LOG: usize = 2;
 const ID_OPEN: usize = 3;
 const ID_TOGGLE: usize = 4;
-const TIP_READY: &str = "parakey - Ctrl+Win to talk, +Space to lock";
+const TIP_READY: &str = "Fleow - Ctrl+Win to talk, +Space to lock";
 /// Broadcast by a second instance so the running one shows its dashboard.
-const SHOW_MSG_NAME: &str = "parakey-show";
+const SHOW_MSG_NAME: &str = "fleow-show";
 
 enum AsrMsg {
     Ready,
@@ -100,15 +100,15 @@ impl App {
     /// Push the current state to the tray icon, tooltip, idle dash and dashboard header.
     fn sync(&mut self) {
         let (status, tip, text, button, idle) = if self.paused {
-            (Status::Paused, "parakey - paused", "Paused. Ctrl+Win does nothing until you resume.", "Resume", None)
+            (Status::Paused, "Fleow - paused", "Paused. Ctrl+Win does nothing until you resume.", "Resume", None)
         } else if self.recording {
             (Status::Recording, TIP_READY, "Recording…", "Pause", Some(Idle::Ready))
         } else {
             match self.model {
-                Model::Loading => (Status::Loading, "parakey - loading model...", "Loading the speech model…", "Pause", Some(Idle::Loading)),
+                Model::Loading => (Status::Loading, "Fleow - loading model...", "Loading the speech model…", "Pause", Some(Idle::Loading)),
                 Model::Failed => (
                     Status::Error,
-                    "parakey - model failed to load (see log)",
+                    "Fleow - model failed to load (see log)",
                     "The speech model failed to load. Open the log from the tray menu.",
                     "Pause",
                     Some(Idle::Error),
@@ -232,7 +232,7 @@ fn show_menu(hwnd: HWND, paused: bool) -> usize {
     unsafe {
         let menu = CreatePopupMenu();
         let items = [
-            (ID_OPEN, "Open parakey"),
+            (ID_OPEN, "Open Fleow"),
             (ID_TOGGLE, if paused { "Resume listening" } else { "Pause listening" }),
             (ID_LOG, "Open log"),
             (ID_QUIT, "Quit"),
@@ -256,7 +256,7 @@ fn show_menu(hwnd: HWND, paused: bool) -> usize {
 
 fn open_log() {
     unsafe {
-        let path = wide(&win::data_dir().join("parakey.log").to_string_lossy());
+        let path = wide(&win::data_dir().join("fleow.log").to_string_lossy());
         let open = wide("open");
         ShellExecuteW(core::ptr::null_mut(), open.as_ptr(), path.as_ptr(), core::ptr::null(), core::ptr::null(), SW_SHOWNORMAL);
     }
@@ -415,7 +415,7 @@ fn asr_thread(hwnd: usize, jobs: mpsc::Receiver<(Vec<f32>, u32)>, results: mpsc:
                 win::log(&format!("{:.1}s audio -> {latency_ms}ms, {} chars", audio_ms as f32 / 1000.0, text.len()));
                 post(AsrMsg::Transcribed(Entry::new(text.clone(), audio_ms, latency_ms)));
                 // With a fake mic (dev testing) only the clipboard is set: never type into whatever is focused.
-                let fake_mic = std::env::var_os("PARAKEY_FAKE_MIC").is_some();
+                let fake_mic = std::env::var_os("FLEOW_FAKE_MIC").is_some();
                 if win::set_clipboard(hwnd as HWND, &(text + " ")) && !fake_mic {
                     win::wait_modifiers_released();
                     win::send_paste();
@@ -439,7 +439,7 @@ fn main() {
     if !win::single_instance() {
         // Already running: just bring up its dashboard (e.g. launched again from Start).
         unsafe {
-            let other = FindWindowW(wide("parakey-main").as_ptr(), core::ptr::null());
+            let other = FindWindowW(wide("fleow-main").as_ptr(), core::ptr::null());
             if !other.is_null() {
                 AllowSetForegroundWindow(ASFW_ANY);
                 PostMessageW(other, show_me, 0, 0);

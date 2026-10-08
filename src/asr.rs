@@ -159,13 +159,13 @@ mod tests {
 }
 
 /// End-to-end check against a real model + 16-bit PCM wav:
-/// `PARAKEY_WAV=clip.wav cargo test --release -- --ignored --nocapture`
+/// `FLEOW_WAV=clip.wav cargo test --release -- --ignored --nocapture`
 #[cfg(test)]
 mod e2e {
     #[test]
     #[ignore]
     fn transcribe_wav() {
-        let path = std::env::var("PARAKEY_WAV").expect("set PARAKEY_WAV");
+        let path = std::env::var("FLEOW_WAV").expect("set FLEOW_WAV");
         let (pcm, rate) = crate::audio::read_wav_pcm16(std::path::Path::new(&path)).unwrap();
         let audio = crate::audio::resample(&pcm, rate, 16000);
         let mut m = super::Parakeet::load(&crate::win::data_dir().join("model")).unwrap();
