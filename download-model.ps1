@@ -1,7 +1,7 @@
-# Downloads the Parakeet TDT 0.6B v2 ONNX export (~2.4 GB) into %LOCALAPPDATA%\Fleow\model.
-# Fleow looks for the model there at startup.
+# Downloads the Parakeet TDT 0.6B v2 ONNX export (~2.4 GB) into %LOCALAPPDATA%\Flowe\model.
+# Flowe looks for the model there at startup.
 $ErrorActionPreference = "Stop"
-$dir = Join-Path $env:LOCALAPPDATA "Fleow\model"
+$dir = Join-Path $env:LOCALAPPDATA "Flowe\model"
 New-Item -ItemType Directory -Force $dir | Out-Null
 $base = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main"
 foreach ($f in "vocab.txt", "decoder_joint-model.onnx", "encoder-model.onnx", "encoder-model.onnx.data") {

@@ -19,7 +19,7 @@ pub fn wide(s: &str) -> Vec<u16> {
 }
 
 pub fn data_dir() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("Fleow")
+    std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("Flowe")
 }
 
 /// "YYYY-MM-DD HH:MM:SS" in local time.
@@ -30,7 +30,7 @@ pub fn local_time() -> String {
 }
 
 pub fn log(msg: &str) {
-    let path = data_dir().join("fleow.log");
+    let path = data_dir().join("flowe.log");
     // Keep the log from growing forever.
     if std::fs::metadata(&path).map(|m| m.len() > 1 << 20).unwrap_or(false) {
         let _ = std::fs::remove_file(&path);
@@ -40,9 +40,9 @@ pub fn log(msg: &str) {
     }
 }
 
-/// Returns false if another Fleow is already running. The mutex lives until the process exits.
+/// Returns false if another Flowe is already running. The mutex lives until the process exits.
 pub fn single_instance() -> bool {
-    let name = wide("fleow-single-instance");
+    let name = wide("flowe-single-instance");
     unsafe {
         CreateMutexW(core::ptr::null(), 0, name.as_ptr());
         GetLastError() != ERROR_ALREADY_EXISTS

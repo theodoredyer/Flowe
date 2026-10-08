@@ -36,7 +36,7 @@ impl Tray {
             ([113, 113, 122, 255], 120), // paused
         ];
         let icons = styles.map(|(bg, alpha)| icon::badge(n, bg, alpha).map_or(core::ptr::null_mut(), hicon));
-        let mut t = Self { hwnd, msg, icons, status: Status::Loading, tip: "Fleow - loading model...".into() };
+        let mut t = Self { hwnd, msg, icons, status: Status::Loading, tip: "Flowe - loading model...".into() };
         t.add();
         t
     }

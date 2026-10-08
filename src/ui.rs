@@ -160,7 +160,7 @@ impl Ui {
         unsafe {
             let hinst = GetModuleHandleW(core::ptr::null());
             let s = GetDpiForSystem() as f32 / 96.0;
-            let class = wide("fleow-main");
+            let class = wide("flowe-main");
             // Icon resource 1 is embedded by build.rs; null just means the default icon.
             let icon = LoadImageW(hinst, 1 as PCWSTR, IMAGE_ICON, 0, 0, LR_DEFAULTSIZE);
             let icon_sm = LoadImageW(hinst, 1 as PCWSTR, IMAGE_ICON, px(s, 16), px(s, 16), 0);
@@ -180,7 +180,7 @@ impl Ui {
             let hwnd = CreateWindowExW(
                 0,
                 class.as_ptr(),
-                wide("Fleow").as_ptr(),
+                wide("Flowe").as_ptr(),
                 WS_OVERLAPPEDWINDOW,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,

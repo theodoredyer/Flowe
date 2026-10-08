@@ -1,4 +1,4 @@
-//! Recording history (%LOCALAPPDATA%\Fleow\history.tsv) and the usage stats derived from it.
+//! Recording history (%LOCALAPPDATA%\Flowe\history.tsv) and the usage stats derived from it.
 //! Plain tab-separated text so it stays readable and greppable.
 
 use std::io::Write;

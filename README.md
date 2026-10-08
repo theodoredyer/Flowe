@@ -1,4 +1,4 @@
-# Fleow
+# Flowe
 
 Local push-to-talk dictation for Windows, a stand-in for Wispr Flow / FluidVoice.
 Hold **Ctrl+Win**, talk, let go. The audio runs through NVIDIA's **Parakeet TDT 0.6B v2**
@@ -21,7 +21,7 @@ No cloud, no account, no usage limits.
 | ...then tap **Space** | locks: keeps recording hands-free; press Ctrl+Win again to stop |
 | **Esc** while locked | cancels |
 | Ctrl+Win + any other key | cancels and passes through, so Ctrl+Win+Left etc still work |
-| Tray icon, left-click | opens the dashboard (so does launching Fleow again) |
+| Tray icon, left-click | opens the dashboard (so does launching Flowe again) |
 | Tray icon, right-click | Open / Pause listening / Open log / Quit |
 
 Taps shorter than 0.3 s are ignored. A forgotten locked recording stops itself after 5 minutes.
@@ -34,27 +34,27 @@ Only building needs tools: `winget install Rustlang.Rustup Microsoft.VisualStudi
 
 ```powershell
 cargo build --release
-.\download-model.ps1   # 2.4 GB from Hugging Face -> %LOCALAPPDATA%\Fleow\model
-.\install.ps1          # copies the exe to %LOCALAPPDATA%\Fleow, adds a Start Menu entry, launches
+.\download-model.ps1   # 2.4 GB from Hugging Face -> %LOCALAPPDATA%\Flowe\model
+.\install.ps1          # copies the exe to %LOCALAPPDATA%\Flowe, adds a Start Menu entry, launches
 ```
 
-After that, press the Windows key and type "Fleow" to start it. `.\install.ps1 -Startup` also
-launches it at sign-in, hidden in the tray (`fleow.exe --tray`); `.\install.ps1 -Uninstall`
+After that, press the Windows key and type "Flowe" to start it. `.\install.ps1 -Startup` also
+launches it at sign-in, hidden in the tray (`flowe.exe --tray`); `.\install.ps1 -Uninstall`
 removes the shortcuts. `cargo run --release --bin mkicon` regenerates the app icon. Quit Wispr Flow (or change
 its hotkey) first, or both apps will react to Ctrl+Win.
 
-## Files in `%LOCALAPPDATA%\Fleow\`
+## Files in `%LOCALAPPDATA%\Flowe\`
 
 - `model\` — the ONNX model
 - `history.tsv` — your recordings: time, audio length, transcription time, word count, text.
   Plain text, so it is readable and greppable; "Clear history" deletes it.
-- `fleow.log` — timings and errors only, never transcript text
+- `flowe.log` — timings and errors only, never transcript text
 
 ## Notes
 
 - RAM sits around 400 MB while idle: that is the model staying loaded so transcription is
   instant. Transcribing a 10 s clip takes about 0.3 s on an RTX 4070.
-- Apps running as Administrator will not receive the paste unless Fleow runs elevated too.
+- Apps running as Administrator will not receive the paste unless Flowe runs elevated too.
 - The dashboard is dark-only (custom drawn), with a dark title bar on Windows 11.
 - `assets/nemo128.onnx` (mel-spectrogram preprocessor) comes from
   [onnx-asr](https://github.com/istupakov/onnx-asr), MIT; the model export is

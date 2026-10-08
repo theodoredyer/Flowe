@@ -94,7 +94,7 @@ impl Recorder {
     pub fn stop(&mut self) -> (Vec<f32>, u32) {
         self.stream = None; // dropping closes the device
         let samples = self.shared.buf.lock().map(|mut b| std::mem::take(&mut *b)).unwrap_or_default();
-        if let Some(path) = std::env::var_os("FLEOW_FAKE_MIC") {
+        if let Some(path) = std::env::var_os("FLOWE_FAKE_MIC") {
             // Dev aid: pretend the mic heard this wav, so the whole pipeline can be tested silently.
             if let Some(wav) = read_wav_pcm16(std::path::Path::new(&path)) {
                 return wav;
