@@ -9,8 +9,9 @@ No cloud, no account, no usage limits.
   on any Windows GPU without CUDA, and falls back to CPU.
 - Idle cost is zero: the mic is closed, no timers run, CPU sits at 0.00%. Only the keyboard
   hook is alive. Pausing removes even that.
-- A tiny dash just above the taskbar means it is listening; it grows into a level meter while
-  recording. An "F" badge sits in the tray, and the dashboard window (opens on launch, closing it
+- A tiny dash just above the taskbar means it is listening; while recording it becomes a pill of
+  liquid that rises and sloshes with your voice (red, amber when locked). Soft chimes play when
+  recording starts and stops; set `FLOWE_NO_SOUND=1` to silence them. An "F" badge sits in the tray, and the dashboard window (opens on launch, closing it
   only hides it) has pause/resume, your recording history and usage stats.
 
 ## Controls

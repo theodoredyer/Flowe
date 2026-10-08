@@ -1,17 +1,20 @@
 //! Bottom-center indicator, click-through, never takes focus.
 //! Idle: a tiny dash just above the taskbar meaning "Flowe is listening". Recording: a pill
-//! with a level meter. Static states are drawn once and cost nothing; only the animated ones
-//! run a timer.
+//! filled with liquid that rises and sloshes with your voice. Static states are drawn once and
+//! cost nothing; only the animated ones run a timer.
 
-use tiny_skia::Pixmap;
+use tiny_skia::{Mask, Path, PathBuilder, Pixmap, Transform};
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-use crate::draw::{capsule, circle, fill, rect};
+use crate::draw::{capsule, circle, fill, fill_masked, rect};
 use crate::win::wide;
+
+/// Animation timer rate (see TIMER_ANIM in main.rs).
+const FPS: f32 = 60.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Idle {
@@ -33,12 +36,15 @@ pub enum View {
     Flash,
 }
 
-const BARS: usize = 9;
-const BG: [u8; 4] = [24, 24, 27, 240];
+const BG: [u8; 4] = [20, 20, 23, 245];
 const FG: [u8; 4] = [250, 250, 250, 255];
-const RED: [u8; 4] = [239, 68, 68, 255];
-const AMBER: [u8; 4] = [245, 158, 11, 255];
 const DIM: [u8; 4] = [113, 113, 122, 255];
+const AMBER: [u8; 4] = [245, 158, 11, 255];
+
+/// Liquid layers, back to front: (wavelength px, speed rad/s, phase, amplitude x, y offset px).
+const LAYERS: [(f32, f32, f32, f32, f32); 3] = [(104.0, 2.2, 0.0, 1.0, 0.0), (76.0, -3.0, 1.7, 0.8, 2.0), (140.0, 3.6, 3.1, 0.6, 4.0)];
+const RECORDING: [[u8; 4]; 3] = [[150, 20, 38, 210], [226, 52, 62, 215], [255, 104, 98, 225]];
+const LOCKED: [[u8; 4]; 3] = [[150, 82, 6, 210], [232, 142, 10, 215], [252, 190, 66, 225]];
 
 pub struct Overlay {
     hwnd: HWND,
@@ -46,6 +52,8 @@ pub struct Overlay {
     h: i32,
     s: f32,
     pixmap: Pixmap,
+    /// The full-size capsule the liquid is clipped to.
+    mask: Mask,
     memdc: HDC,
     dib: HBITMAP,
     bits: *mut u8,
@@ -53,14 +61,16 @@ pub struct Overlay {
     /// What to fall back to when a recording ends.
     idle: View,
     tick: u32,
-    levels: [f32; BARS],
+    /// Smoothed loudness 0..1 and animation clock (seconds) for the liquid.
+    smooth: f32,
+    t: f32,
 }
 
 impl Overlay {
     pub fn new() -> Option<Self> {
         unsafe {
             let s = GetDpiForSystem() as f32 / 96.0;
-            let (w, h) = ((128.0 * s) as i32, (34.0 * s) as i32);
+            let (w, h) = ((208.0 * s) as i32, (44.0 * s) as i32);
             let class = wide("flowe-overlay");
             let wc = WNDCLASSW {
                 lpfnWndProc: Some(DefWindowProcW),
@@ -102,19 +112,23 @@ impl Overlay {
                 return None;
             }
             SelectObject(memdc, dib);
+            let mut mask = Mask::new(w as u32, h as u32)?;
+            mask.fill_path(&capsule(0.0, 0.0, w as f32, h as f32), tiny_skia::FillRule::Winding, true, Transform::identity());
             Some(Self {
                 hwnd,
                 w,
                 h,
                 s,
                 pixmap: Pixmap::new(w as u32, h as u32)?,
+                mask,
                 memdc,
                 dib,
                 bits: bits as *mut u8,
                 view: View::Hidden,
                 idle: View::Hidden,
                 tick: 0,
-                levels: [0.0; BARS],
+                smooth: 0.0,
+                t: 0.0,
             })
         }
     }
@@ -141,8 +155,8 @@ impl Overlay {
                 ShowWindow(self.hwnd, SW_HIDE);
                 return;
             }
-            if !matches!(was, View::Recording | View::Locked) {
-                self.levels = [0.0; BARS];
+            if view == View::Recording {
+                self.smooth = 0.0; // a fresh recording starts with a calm surface
             }
             self.render(0.0);
             if was == View::Hidden {
@@ -160,7 +174,7 @@ impl Overlay {
                 self.render(level);
                 true
             }
-            View::Flash if self.tick >= 30 => {
+            View::Flash if self.tick >= FPS as u32 => {
                 self.back_to_idle();
                 false
             }
@@ -185,9 +199,8 @@ impl Overlay {
 
     fn render(&mut self, level: f32) {
         let (w, h, s) = (self.w as f32, self.h as f32, self.s);
+        self.pixmap.fill(tiny_skia::Color::TRANSPARENT);
         let px = &mut self.pixmap;
-        px.fill(tiny_skia::Color::TRANSPARENT);
-        let (cy, r) = (h / 2.0, h / 2.0);
 
         match self.view {
             View::Hidden => return,
@@ -202,29 +215,33 @@ impl Overlay {
             }
             View::Recording | View::Locked => {
                 fill(px, capsule(0.0, 0.0, w, h), BG);
-                let dot = if self.view == View::Recording { RED } else { AMBER };
-                fill(px, circle(r, cy, 5.0 * s), dot);
-                self.levels.rotate_left(1);
-                self.levels[BARS - 1] = (level * 12.0).min(1.0);
-                let (bw, gap) = (4.0 * s, 3.0 * s);
-                let mut x = r + 14.0 * s;
-                for lv in self.levels {
-                    let bh = (lv * (h - 14.0 * s)).max(4.0 * s);
-                    fill(px, capsule(x, cy - bh / 2.0, bw, bh), FG);
-                    x += bw + gap;
+                // Loudness: quick to rise, slow to settle, so the liquid surges and then sloshes back.
+                let target = (level * 10.0).min(1.0);
+                let k = if target > self.smooth { 0.35 } else { 0.06 };
+                self.smooth += (target - self.smooth) * k;
+                self.t += 1.0 / FPS;
+                let colors = if self.view == View::Locked { LOCKED } else { RECORDING };
+                let base = h * (0.74 - 0.40 * self.smooth);
+                let amp = s * (1.2 + 9.0 * self.smooth);
+                for (i, &(wavelength, speed, phase, amp_x, dy)) in LAYERS.iter().enumerate() {
+                    let path = wave(w, h, base + dy * s, amp * amp_x, wavelength * s, speed * self.t + phase);
+                    fill_masked(px, path, colors[i], Some(&self.mask));
                 }
                 if self.view == View::Locked {
-                    let lx = w - r - 1.0 * s;
-                    fill(px, capsule(lx - 3.6 * s, cy - 8.0 * s, 7.2 * s, 10.0 * s), AMBER); // shackle
-                    fill(px, capsule(lx - 2.0 * s, cy - 6.4 * s, 4.0 * s, 8.0 * s), BG);
-                    fill(px, rect(lx - 5.0 * s, cy - 2.5 * s, 10.0 * s, 8.0 * s), AMBER); // body
+                    let (lx, cy) = (w - h / 2.0 - 1.0 * s, h / 2.0);
+                    let hole = [30, 30, 34, 255];
+                    fill(px, capsule(lx - 3.6 * s, cy - 8.0 * s, 7.2 * s, 10.0 * s), FG); // shackle
+                    fill(px, capsule(lx - 2.0 * s, cy - 6.4 * s, 4.0 * s, 8.0 * s), hole);
+                    fill(px, rect(lx - 5.0 * s, cy - 2.5 * s, 10.0 * s, 8.0 * s), FG); // body
                 }
             }
             View::Transcribing => {
-                fill(px, capsule(0.0, 0.0, w, h), BG);
+                let (pw, ph) = (128.0 * s, 34.0 * s);
+                let (x0, y0) = ((w - pw) / 2.0, (h - ph) / 2.0);
+                fill(px, capsule(x0, y0, pw, ph), BG);
                 for i in 0..3 {
-                    let on = ((self.tick / 6) as i32 - i).rem_euclid(3) == 0;
-                    fill(px, circle(w / 2.0 + (i - 1) as f32 * 14.0 * s, cy, 3.5 * s), if on { FG } else { DIM });
+                    let on = ((self.tick / 12) as i32 - i).rem_euclid(3) == 0;
+                    fill(px, circle(w / 2.0 + (i - 1) as f32 * 14.0 * s, h / 2.0, 3.5 * s), if on { FG } else { DIM });
                 }
             }
         }
@@ -245,6 +262,25 @@ impl Overlay {
             UpdateLayeredWindow(self.hwnd, core::ptr::null_mut(), core::ptr::null(), &size, self.memdc, &src, 0, &blend, ULW_ALPHA);
         }
     }
+}
+
+/// Liquid body: the area under a wavy surface (a main sine plus a smaller faster harmonic for
+/// a less mechanical look), spanning the full width and down to the bottom.
+fn wave(w: f32, h: f32, base: f32, amp: f32, wavelength: f32, phase: f32) -> Path {
+    let k = std::f32::consts::TAU / wavelength;
+    let y = |x: f32| base + amp * ((k * x + phase).sin() + 0.18 * (1.7 * k * x - 0.9 * phase).sin());
+    let mut pb = PathBuilder::new();
+    pb.move_to(0.0, y(0.0));
+    let mut x = 2.0;
+    while x < w {
+        pb.line_to(x, y(x));
+        x += 2.0;
+    }
+    pb.line_to(w, y(w));
+    pb.line_to(w, h);
+    pb.line_to(0.0, h);
+    pb.close();
+    pb.finish().unwrap_or_else(|| rect(0.0, 0.0, w, h))
 }
 
 impl Drop for Overlay {

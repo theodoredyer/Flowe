@@ -8,6 +8,7 @@ mod history;
 mod hotkey;
 mod icon;
 mod overlay;
+mod sound;
 mod tray;
 mod ui;
 mod win;
@@ -94,7 +95,7 @@ fn with_app(f: impl FnOnce(&mut App)) {
 
 impl App {
     fn animate(&self) {
-        unsafe { SetTimer(self.hwnd, TIMER_ANIM, 33, None) };
+        unsafe { SetTimer(self.hwnd, TIMER_ANIM, 16, None) };
     }
 
     /// Push the current state to the tray icon, tooltip, idle dash and dashboard header.
@@ -145,7 +146,7 @@ impl App {
                 let on_full = move || unsafe {
                     PostMessageW(hwnd as HWND, WM_AUTOSTOP, 0, 0);
                 };
-                if let Err(e) = self.recorder.start(on_full) {
+                if let Err(e) = self.recorder.start(sound::start_guard_ms(), on_full) {
                     win::log(&format!("mic error: {e}"));
                     if let Ok(mut c) = hotkey::COMBO.lock() {
                         c.reset();
@@ -153,6 +154,7 @@ impl App {
                     self.flash();
                     return;
                 }
+                sound::start();
                 self.recording = true;
                 self.started = Instant::now();
                 self.overlay.set(View::Recording);
@@ -175,6 +177,7 @@ impl App {
         }
         self.recording = false;
         let (audio, rate) = self.recorder.stop();
+        sound::stop();
         win::log(&format!("stop: {:.1}s audio, level {:.3}", audio.len() as f32 / rate as f32, audio::rms(&audio)));
         let too_short = self.started.elapsed() < MIN_HOLD || audio.len() < rate as usize * 3 / 10;
         if self.model == Model::Failed {

@@ -3,10 +3,15 @@
 use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, Transform};
 
 pub fn fill(px: &mut Pixmap, path: Path, c: [u8; 4]) {
+    fill_masked(px, path, c, None);
+}
+
+/// Like `fill`, but only paints where `mask` is set (used to clip liquid to the pill).
+pub fn fill_masked(px: &mut Pixmap, path: Path, c: [u8; 4], mask: Option<&tiny_skia::Mask>) {
     let mut paint = Paint::default();
     paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
     paint.anti_alias = true;
-    px.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+    px.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), mask);
 }
 
 pub fn circle(x: f32, y: f32, r: f32) -> Path {

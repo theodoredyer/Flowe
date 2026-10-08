@@ -19,19 +19,30 @@ pub struct Recorder {
     stream: Option<cpal::Stream>,
     shared: Arc<Shared>,
     rate: u32,
+    /// Dev hook (FLOWE_FAKE_LEVEL): synthetic loudness so the overlay animation can be checked without speaking.
+    fake_level: Option<std::time::Instant>,
 }
 
 impl Recorder {
     pub fn new() -> Self {
-        Self { stream: None, shared: Arc::default(), rate: 16000 }
+        Self {
+            stream: None,
+            shared: Arc::default(),
+            rate: 16000,
+            fake_level: std::env::var_os("FLOWE_FAKE_LEVEL").map(|_| std::time::Instant::now()),
+        }
     }
 
     pub fn level(&self) -> f32 {
+        if let Some(t0) = self.fake_level {
+            let t = t0.elapsed().as_secs_f32();
+            return 0.01 + 0.08 * (2.2 * t).sin().abs() * (0.6 + 0.4 * (0.9 * t).sin());
+        }
         f32::from_bits(self.shared.level.load(Ordering::Relaxed))
     }
 
     /// `on_full` fires (once, from the audio thread) when MAX_SECONDS is reached.
-    pub fn start(&mut self, on_full: impl Fn() + Send + 'static) -> Result<(), String> {
+    pub fn start(&mut self, guard_ms: u32, on_full: impl Fn() + Send + 'static) -> Result<(), String> {
         self.stream = None;
         let device = cpal::default_host().default_input_device().ok_or("no microphone found")?;
         let config = device.default_input_config().map_err(|e| e.to_string())?;
@@ -47,7 +58,15 @@ impl Recorder {
         self.shared.full.store(false, Ordering::Relaxed);
 
         let shared = self.shared.clone();
-        let push = move |mono: &mut dyn Iterator<Item = f32>| {
+        // Drop the first `guard_ms` of input: that is when the start chime is playing.
+        let mut skip = (self.rate as u64 * guard_ms as u64 / 1000) as usize;
+        let mut push = move |mono: &mut dyn Iterator<Item = f32>| {
+            while skip > 0 {
+                if mono.next().is_none() {
+                    return;
+                }
+                skip -= 1;
+            }
             let Ok(mut buf) = shared.buf.lock() else { return };
             let start = buf.len();
             buf.extend(mono.take(cap.saturating_sub(start)));
