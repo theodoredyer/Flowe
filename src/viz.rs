@@ -78,26 +78,40 @@ pub struct Viz {
     rng: u32,
     /// Background-noise level the gate subtracts (tracks the quietest recent input).
     floor: f32,
-    /// Plasma colour scheme for this recording (index into PALETTES).
-    palette: usize,
+    /// Recent loudest voice level, for auto-scaling (so normal speech doesn't pin everything at max).
+    peak: f32,
+    /// Plasma colours for this recording: a cyclic 4-colour ramp (5th stop repeats the 1st), and
+    /// the two random hues it was built from.
+    palette: [[f32; 3]; 5],
+    hues: (f32, f32),
 }
 
-/// Plasma colour schemes; a different one is picked for each recording.
-/// Cyclic 4-colour ramps (the 5th stop repeats the 1st), rgb 0..1.
-const PALETTES: [[[f32; 3]; 5]; 6] = [
-    // neon: indigo, violet, magenta, cyan
-    [[0.10, 0.06, 0.32], [0.42, 0.20, 0.86], [0.93, 0.28, 0.66], [0.16, 0.78, 0.92], [0.10, 0.06, 0.32]],
-    // sunset: plum, berry, coral, amber
-    [[0.16, 0.05, 0.22], [0.55, 0.10, 0.45], [0.95, 0.30, 0.30], [1.00, 0.65, 0.20], [0.16, 0.05, 0.22]],
-    // ocean: navy, blue, teal, seafoam
-    [[0.02, 0.08, 0.22], [0.05, 0.35, 0.60], [0.10, 0.75, 0.80], [0.55, 0.95, 0.85], [0.02, 0.08, 0.22]],
-    // aurora: night, emerald, lime, periwinkle
-    [[0.03, 0.10, 0.12], [0.05, 0.55, 0.40], [0.45, 0.90, 0.45], [0.30, 0.45, 0.95], [0.03, 0.10, 0.12]],
-    // candy: grape, pink, peach, sky
-    [[0.30, 0.12, 0.45], [0.95, 0.45, 0.70], [1.00, 0.75, 0.55], [0.55, 0.75, 1.00], [0.30, 0.12, 0.45]],
-    // ember: char, crimson, orange, gold
-    [[0.10, 0.02, 0.02], [0.60, 0.08, 0.05], [0.95, 0.40, 0.08], [1.00, 0.85, 0.40], [0.10, 0.02, 0.02]],
-];
+/// Random plasma palette from two random hues: deep shade of the first, the first at full colour,
+/// the second at full colour, then a pale tint between them. Saturation is random too.
+fn random_palette(r: &mut impl FnMut() -> f32) -> ([[f32; 3]; 5], (f32, f32)) {
+    let h0 = r();
+    let h1 = (h0 + 0.18 + 0.5 * r()).rem_euclid(1.0); // far enough apart to read as two colours
+    let sat = 0.65 + 0.3 * r();
+    let mid = h0 + 0.5 * ((h1 - h0 + 0.5).rem_euclid(1.0) - 0.5); // halfway the short way round
+    let dark = hsv(h0, sat, 0.16);
+    (
+        [dark, hsv(h0, sat, 0.85), hsv(h1, sat, 0.95), hsv(mid.rem_euclid(1.0), sat * 0.45, 1.0), dark],
+        (h0, h1),
+    )
+}
+
+fn hsv(h: f32, s: f32, v: f32) -> [f32; 3] {
+    let f = |n: f32| {
+        let k = (n + h * 6.0).rem_euclid(6.0);
+        v - v * s * k.min(4.0 - k).clamp(0.0, 1.0)
+    };
+    [f(5.0), f(3.0), f(1.0)]
+}
+
+fn clock_seed() -> u32 {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos() ^ d.as_secs() as u32).unwrap_or(1);
+    nanos | 1 // xorshift must not start at 0
+}
 
 impl Viz {
     pub fn new(style: Style) -> Self {
@@ -114,21 +128,29 @@ impl Viz {
             vel: Vec::new(),
             fill: 0.3,
             drops: Vec::new(),
-            rng: 0x9E37_79B9,
+            rng: clock_seed(),
             floor: 0.04,
-            palette: 0,
+            peak: 0.03,
+            palette: [[0.0; 3]; 5],
+            hues: (0.0, 0.0),
         }
+        .with_new_palette()
     }
 
-    /// Calm state for a fresh recording, with a new plasma palette (never the same twice in a row).
+    fn with_new_palette(mut self) -> Self {
+        let (p, h) = random_palette(&mut || self.rand());
+        self.palette = p;
+        self.hues = h;
+        self
+    }
+
+    /// Calm state for a fresh recording, with freshly picked random plasma colours.
     pub fn reset(&mut self) {
-        let (style, rng, floor, prev) = (self.style, self.rng, self.floor, self.palette);
-        *self = Self::new(style);
-        self.rng = rng;
-        self.floor = floor; // the room's noise level carries over between recordings
-        let others = PALETTES.len() - 1;
-        let pick = (self.rand() * others as f32) as usize % others;
-        self.palette = if pick >= prev { pick + 1 } else { pick };
+        let mut fresh = Self::new(self.style);
+        fresh.rng = self.rng;
+        fresh.floor = self.floor; // the room's noise level and your voice level carry over
+        fresh.peak = self.peak;
+        *self = fresh.with_new_palette();
     }
 
     pub fn update(&mut self, level: f32, dt: f32) {
@@ -140,9 +162,13 @@ impl Viz {
             self.floor = (self.floor + (level - self.floor) * 0.002).min(0.04);
         }
         let voice = (level - self.floor * 1.3 - 0.002).max(0.0);
-        self.target = (voice * 12.0).min(1.0);
+        // Auto-scale to your voice: your recent loudest syllables reach ~90%, quieter ones stay
+        // lower, so the visuals breathe with speech instead of sitting at max the whole time.
+        // The peak decays over a few seconds and never drops below a floor (so silence isn't amplified).
+        self.peak = (self.peak * 0.996).max(voice).max(0.03);
+        self.target = (voice / self.peak * 0.9).min(1.0);
         let prev = self.energy;
-        let k = if self.target > self.energy { 0.4 } else { 0.1 };
+        let k = if self.target > self.energy { 0.45 } else { 0.2 };
         self.energy += (self.target - self.energy) * k;
         self.onset = (self.target - prev).max(0.0);
         self.t += dt;
@@ -198,7 +224,7 @@ impl Viz {
         }
         let bottom = a.y + a.h;
         let dx = a.w / (n - 1) as f32;
-        self.fill += (0.25 + 0.5 * self.energy - self.fill) * 0.08;
+        self.fill += (0.22 + 0.5 * self.energy - self.fill) * 0.16;
         let rest = bottom - self.fill * a.h;
 
         // Excite: a constant shimmer that grows with loudness, plus a splash on each syllable onset.
@@ -229,7 +255,7 @@ impl Viz {
         // Springs: each column is pulled back to rest and damped, then neighbours share height
         // a few times per frame so disturbances travel along the surface as ripples.
         for i in 0..n {
-            self.vel[i] += -0.012 * self.height[i] - 0.018 * self.vel[i];
+            self.vel[i] += -0.02 * self.height[i] - 0.04 * self.vel[i];
             self.height[i] += self.vel[i];
         }
         let mut left = vec![0.0f32; n];
@@ -321,7 +347,7 @@ impl Viz {
         let (cw, ch) = (a.w / s, a.h / s);
         let cx = cw * (0.5 + 0.35 * (t * 0.6).sin());
         let cy = ch * (0.5 + 0.4 * (t * 0.8).cos());
-        let palette = &PALETTES[self.palette];
+        let palette = &self.palette;
         shade(px, mask, a, |x, y| {
             let (u, v) = ((x - a.x) / s, (y - a.y) / s);
             let mut f = (u * 0.06 + t * 1.3).sin() + (v * 0.11 - t * 0.9).sin() + ((u + v) * 0.045 + t * 0.7).sin();
@@ -407,7 +433,7 @@ fn shade(px: &mut Pixmap, mask: &Mask, a: Area, mut f: impl FnMut(f32, f32) -> (
     }
 }
 
-/// Samples a cyclic 4-colour ramp (see PALETTES) at `k`, with smooth blends between stops.
+/// Samples a cyclic 4-colour ramp (see random_palette) at `k`, with smooth blends between stops.
 fn ramp(stops: &[[f32; 3]; 5], k: f32) -> [f32; 3] {
     let k = k.rem_euclid(1.0) * 4.0;
     let i = (k as usize).min(3);
@@ -511,22 +537,57 @@ mod tests {
         assert_eq!(v.target, 0.0, "background noise must not move the bars");
         run(&mut v, 0.08, 1.0); // talking
         assert!(v.energy > 0.5);
-        run(&mut v, 0.012, 0.5); // stop talking
+        run(&mut v, 0.012, 0.25); // stop talking
         assert_eq!(v.target, 0.0);
-        assert!(v.energy < 0.05, "still moving after 0.5 s of silence: {}", v.energy);
+        assert!(v.energy < 0.05, "still moving after 0.25 s of silence: {}", v.energy);
     }
 
     #[test]
-    fn plasma_palette_changes_every_recording() {
-        let mut v = Viz::new(Style::Plasma);
-        let mut seen = std::collections::HashSet::new();
-        for _ in 0..40 {
-            let before = v.palette;
-            v.reset();
-            assert_ne!(v.palette, before);
-            seen.insert(v.palette);
+    fn normal_speech_does_not_pin_the_meter_at_max() {
+        let mut v = Viz::new(Style::Waves);
+        let (mut sum, mut low, n) = (0.0, 0, 600);
+        for i in 0..n {
+            // syllables at ~5 Hz between 0.02 and 0.12 RMS, like ordinary talking
+            let t = i as f32 / 60.0;
+            v.update(0.02 + 0.10 * (t * 15.0).sin().abs(), 1.0 / 60.0);
+            if i >= 120 {
+                sum += v.target;
+                low += (v.target < 0.35) as i32;
+            }
         }
-        assert_eq!(seen.len(), PALETTES.len(), "every palette should come up");
+        let mean = sum / (n - 120) as f32;
+        assert!(mean < 0.7, "meter sits near max while talking: mean {mean}");
+        assert!(low > 60, "the gaps between syllables never show: {low} low frames");
+    }
+
+    #[test]
+    fn plasma_colours_are_random_every_recording() {
+        let mut v = Viz::new(Style::Plasma);
+        let mut hues = Vec::new();
+        for _ in 0..40 {
+            let before = v.hues.0;
+            v.reset();
+            assert!((v.hues.0 - before).abs() > 1e-4, "same colours twice in a row");
+            hues.push(v.hues.0);
+            let gap = (v.hues.1 - v.hues.0).rem_euclid(1.0);
+            assert!((0.17..=0.69).contains(&gap), "hues too close to tell apart: {gap}");
+        }
+        // Spread across the whole colour wheel, not a couple of presets.
+        let buckets: std::collections::HashSet<_> = hues.iter().map(|h| (h * 8.0) as u32).collect();
+        assert!(buckets.len() >= 6, "only {} of 8 hue sectors used", buckets.len());
+        // Two separate launches start with different colours (clock-seeded).
+        let a = Viz::new(Style::Plasma).hues.0;
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        assert_ne!(a, Viz::new(Style::Plasma).hues.0);
+    }
+
+    #[test]
+    fn hsv_matches_known_colours() {
+        let close = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-4);
+        assert!(close(hsv(0.0, 1.0, 1.0), [1.0, 0.0, 0.0]));
+        assert!(close(hsv(1.0 / 3.0, 1.0, 1.0), [0.0, 1.0, 0.0]));
+        assert!(close(hsv(2.0 / 3.0, 1.0, 0.5), [0.0, 0.0, 0.5]));
+        assert!(close(hsv(0.3, 0.0, 0.7), [0.7, 0.7, 0.7]));
     }
 
     #[test]

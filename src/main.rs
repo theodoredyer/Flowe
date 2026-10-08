@@ -165,6 +165,7 @@ impl App {
                 self.animate();
             }
             Action::Lock => {
+                win::log("locked hands-free");
                 let guard = sound::lock();
                 self.recorder.mute(guard);
                 self.overlay.set(View::Locked);

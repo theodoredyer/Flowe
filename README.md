@@ -14,8 +14,9 @@ No cloud, no account, no usage limits.
   the dashboard: **Waves** (level bars), **Liquid** (spring-based water sim with splashes and
   droplets), **Plasma** (colour field that speeds up and gains contrast as you talk) or
   **Lava lamp** (merging glowing blobs). Picking one plays a short preview.
-- Soft whooshes play when recording starts and stops, and a quick tick confirms Space-lock
-  (switch in the dashboard). Plasma picks a new colour palette every recording.
+- Soft "thock" sounds (like a creamy mechanical keyboard) play when recording starts and stops,
+  and a double-tap confirms Space-lock
+  (switch in the dashboard). Plasma builds a random colour palette every recording.
 - An "F" badge sits in the tray, and the dashboard window (opens on launch, closing it
   only hides it) has pause/resume, your recording history and usage stats.
 
