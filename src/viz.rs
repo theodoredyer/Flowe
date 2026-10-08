@@ -1,4 +1,4 @@
-﻿//! Recording visualizations for the overlay pill. Each style turns mic loudness into motion;
+//! Recording visualizations for the overlay pill. Each style turns mic loudness into motion;
 //! all of them run only while the pill is animating (recording or previewing).
 
 use tiny_skia::{Color, GradientStop, LinearGradient, Mask, Paint, Path, PathBuilder, Pixmap, Point, PremultipliedColorU8, SpreadMode, Stroke, Transform};
