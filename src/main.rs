@@ -8,9 +8,11 @@ mod history;
 mod hotkey;
 mod icon;
 mod overlay;
+mod settings;
 mod sound;
 mod tray;
 mod ui;
+mod viz;
 mod win;
 
 use std::cell::RefCell;
@@ -27,6 +29,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use history::{Entry, History};
 use hotkey::Action;
 use overlay::{Idle, Overlay, View};
+use settings::Settings;
 use tray::{Status, Tray};
 use ui::{Ui, UiEvent};
 use win::wide;
@@ -77,6 +80,7 @@ struct App {
     started: Instant,
     taskbar_created: u32,
     show_me: u32,
+    settings: Settings,
 }
 
 thread_local! {
@@ -224,6 +228,27 @@ impl App {
         }
     }
 
+    fn set_style(&mut self, style: viz::Style) {
+        self.settings.style = style;
+        self.settings.save();
+        self.overlay.set_style(style);
+        self.ui.set_prefs(style, self.settings.sounds);
+        if !self.recording {
+            self.overlay.demo(); // show what it looks like
+            self.animate();
+        }
+    }
+
+    fn toggle_sounds(&mut self) {
+        self.settings.sounds = !self.settings.sounds;
+        self.settings.save();
+        sound::set_enabled(self.settings.sounds);
+        self.ui.set_prefs(self.settings.style, self.settings.sounds);
+        if self.settings.sounds {
+            sound::start(); // let them hear it
+        }
+    }
+
     fn clear_history(&mut self) {
         self.history.clear();
         self.ui.rebuild(&self.history);
@@ -330,6 +355,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 UiEvent::TogglePause => with_app(|app| app.set_paused(!app.paused)),
                 UiEvent::ClearHistory => with_app(|app| app.clear_history()),
                 UiEvent::CopyRow => with_app(|app| app.copy_selected()),
+                UiEvent::SetStyle(style) => with_app(|app| app.set_style(style)),
+                UiEvent::ToggleSounds => with_app(|app| app.toggle_sounds()),
                 UiEvent::None => {}
             }
         }
@@ -459,7 +486,9 @@ fn main() {
             return;
         };
         let hwnd = ui.hwnd;
-        let Some(overlay) = Overlay::new() else {
+        let settings = Settings::load();
+        sound::set_enabled(settings.sounds);
+        let Some(overlay) = Overlay::new(settings.style) else {
             win::log("failed to create overlay");
             return;
         };
@@ -473,6 +502,7 @@ fn main() {
         }
         let history = History::load();
         ui.rebuild(&history);
+        ui.set_prefs(settings.style, settings.sounds);
         APP.with(|a| {
             *a.borrow_mut() = Some(App {
                 hwnd,
@@ -489,6 +519,7 @@ fn main() {
                 started: Instant::now(),
                 taskbar_created,
                 show_me,
+                settings,
             })
         });
         with_app(|app| {

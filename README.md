@@ -9,9 +9,13 @@ No cloud, no account, no usage limits.
   on any Windows GPU without CUDA, and falls back to CPU.
 - Idle cost is zero: the mic is closed, no timers run, CPU sits at 0.00%. Only the keyboard
   hook is alive. Pausing removes even that.
-- A tiny dash just above the taskbar means it is listening; while recording it becomes a pill of
-  liquid that rises and sloshes with your voice (red, amber when locked). Soft chimes play when
-  recording starts and stops; set `FLOWE_NO_SOUND=1` to silence them. An "F" badge sits in the tray, and the dashboard window (opens on launch, closing it
+- A tiny dash just above the taskbar means it is listening. While recording it becomes a pill with
+  a state indicator (red dot = recording, amber padlock = locked) and a visualization you pick in
+  the dashboard: **Waves** (level bars), **Liquid** (spring-based water sim with splashes and
+  droplets), **Plasma** (colour field that speeds up and gains contrast as you talk) or
+  **Lava lamp** (merging glowing blobs). Picking one plays a short preview.
+- Soft whooshes play when recording starts and stops (switch in the dashboard).
+- An "F" badge sits in the tray, and the dashboard window (opens on launch, closing it
   only hides it) has pause/resume, your recording history and usage stats.
 
 ## Controls
@@ -50,6 +54,7 @@ its hotkey) first, or both apps will react to Ctrl+Win.
 - `history.tsv` — your recordings: time, audio length, transcription time, word count, text.
   Plain text, so it is readable and greppable; "Clear history" deletes it.
 - `flowe.log` — timings and errors only, never transcript text
+- `settings.txt` — indicator style and sounds on/off
 
 ## Notes
 

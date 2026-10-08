@@ -15,6 +15,7 @@ use windows_sys::core::PCWSTR;
 use crate::draw::{capsule, circle, fill, rect, rounded_rect};
 use crate::history::{Entry, History, fmt_duration};
 use crate::tray::Status;
+use crate::viz::Style;
 use crate::win::wide;
 
 pub const TIMER_UI: usize = 3;
@@ -31,6 +32,7 @@ const ROW_SELECTED: [u8; 4] = [48, 48, 56, 255];
 const BTN: [u8; 4] = [44, 44, 51, 255];
 const BTN_HOVER: [u8; 4] = [58, 58, 66, 255];
 const THUMB: [u8; 4] = [74, 74, 84, 255];
+const SELECTED: [u8; 4] = [236, 236, 240, 255];
 const GREEN: [u8; 4] = [34, 197, 94, 255];
 const RED: [u8; 4] = [239, 68, 68, 255];
 const AMBER: [u8; 4] = [245, 158, 11, 255];
@@ -41,6 +43,7 @@ const T_GREY: u32 = 0x0093_8B8B;
 const T_DIM: u32 = 0x006A_6262;
 const T_AMBER: u32 = 0x000B_9EF5;
 const T_GREEN: u32 = 0x005E_C522;
+const T_INK: u32 = 0x0018_1414; // dark text on the selected segment
 const CAPTION: u32 = 0x0016_1414; // BG as COLORREF
 
 const F_BODY: usize = 0;
@@ -56,6 +59,8 @@ enum Hit {
     Clear,
     Row(usize),
     Thumb,
+    Style(usize),
+    Sounds,
 }
 
 pub enum UiEvent {
@@ -63,6 +68,8 @@ pub enum UiEvent {
     TogglePause,
     ClearHistory,
     CopyRow,
+    SetStyle(Style),
+    ToggleSounds,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -91,6 +98,10 @@ struct Layout {
     pause: R,
     cards: [R; 4],
     today: R,
+    prefs_label: R,
+    styles: [R; 4],
+    sounds_label: R,
+    sounds: R,
     hist: R,
     title: R,
     notice: R,
@@ -128,6 +139,8 @@ pub struct Ui {
     notice: Option<String>,
     clear_armed: bool,
     clear_w: i32,
+    style: Style,
+    sounds: bool,
 }
 
 fn px(s: f32, v: i32) -> i32 {
@@ -185,7 +198,7 @@ impl Ui {
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 px(s, 760),
-                px(s, 560),
+                px(s, 600),
                 core::ptr::null_mut(),
                 core::ptr::null_mut(),
                 hinst,
@@ -232,6 +245,8 @@ impl Ui {
                 notice: None,
                 clear_armed: false,
                 clear_w: px(s, 100),
+                style: Style::Waves,
+                sounds: true,
             })
         }
     }
@@ -242,6 +257,12 @@ impl Ui {
         self.status = status;
         self.status_text = text.into();
         self.button_label = button.into();
+        self.repaint();
+    }
+
+    pub fn set_prefs(&mut self, style: Style, sounds: bool) {
+        self.style = style;
+        self.sounds = sounds;
         self.repaint();
     }
 
@@ -292,7 +313,7 @@ impl Ui {
     }
 
     pub fn min_size(&self) -> (i32, i32) {
-        (px(self.s, 620), px(self.s, 440))
+        (px(self.s, 640), px(self.s, 480))
     }
 
     pub fn show(&self) {
@@ -303,7 +324,7 @@ impl Ui {
     }
 
     pub fn hand_cursor(&self) -> bool {
-        matches!(self.hover, Hit::Pause | Hit::Clear | Hit::Row(_))
+        matches!(self.hover, Hit::Pause | Hit::Clear | Hit::Row(_) | Hit::Style(_) | Hit::Sounds)
     }
 
     /// TIMER_UI: the "confirm clear?" state expires.
@@ -334,7 +355,14 @@ impl Ui {
         let cw = (w - 2 * m - 3 * gap) / 4;
         let cards = [0, 1, 2, 3].map(|i| R { x: m + i * (cw + gap), y: p(62), w: cw, h: p(78) });
         let today = R { x: m, y: p(152), w: w - 2 * m, h: p(18) };
-        let hist = R { x: m, y: p(182), w: w - 2 * m, h: (h - p(182) - m).max(p(120)) };
+        // Preferences row: indicator style (segmented) on the left, sounds switch on the right.
+        let row_y = p(182);
+        let prefs_label = R { x: m, y: row_y, w: p(70), h: p(30) };
+        let (seg_w, seg_gap) = (p(86), p(6));
+        let styles = [0, 1, 2, 3].map(|i| R { x: m + p(74) + i * (seg_w + seg_gap), y: row_y, w: seg_w, h: p(30) });
+        let sounds = R { x: w - m - p(40), y: row_y + p(5), w: p(40), h: p(20) };
+        let sounds_label = R { x: sounds.x - p(70), y: row_y, w: p(62), h: p(30) };
+        let hist = R { x: m, y: p(226), w: w - 2 * m, h: (h - p(226) - m).max(p(120)) };
         let title = R { x: hist.x + p(14), y: hist.y + p(10), w: p(70), h: p(22) };
         let clear = R { x: hist.x + hist.w - p(14) - self.clear_w, y: hist.y + p(10), w: self.clear_w, h: p(22) };
         let notice = R { x: title.x + title.w, y: title.y, w: (clear.x - title.x - title.w - p(12)).max(10), h: title.h };
@@ -356,6 +384,10 @@ impl Ui {
             pause,
             cards,
             today,
+            prefs_label,
+            styles,
+            sounds_label,
+            sounds,
             hist,
             title,
             notice,
@@ -376,6 +408,10 @@ impl Ui {
             Hit::Pause
         } else if l.clear.contains(x, y) {
             Hit::Clear
+        } else if let Some(i) = l.styles.iter().position(|r| r.contains(x, y)) {
+            Hit::Style(i)
+        } else if l.sounds.contains(x, y) || l.sounds_label.contains(x, y) {
+            Hit::Sounds
         } else if l.thumb.is_some_and(|t| t.contains(x, y)) {
             Hit::Thumb
         } else if l.list.contains(x, y) {
@@ -430,6 +466,8 @@ impl Ui {
             }
             WM_LBUTTONDOWN => match self.hit(x, y) {
                 Hit::Pause => return UiEvent::TogglePause,
+                Hit::Style(i) => return UiEvent::SetStyle(Style::ALL[i]),
+                Hit::Sounds => return UiEvent::ToggleSounds,
                 Hit::Clear => {
                     if self.clear_armed {
                         self.tick();
@@ -543,6 +581,21 @@ impl Ui {
         for c in l.cards {
             card(pxm, c, p(10));
         }
+        for (i, r) in l.styles.iter().enumerate() {
+            let (x, y, w, h) = rf(*r);
+            let color = if Style::ALL[i] == self.style {
+                SELECTED
+            } else if self.hover == Hit::Style(i) {
+                BTN_HOVER
+            } else {
+                BTN
+            };
+            fill(pxm, capsule(x, y, w, h), color);
+        }
+        let (sx, sy, sw, sh) = rf(l.sounds);
+        fill(pxm, capsule(sx, sy, sw, sh), if self.sounds { GREEN } else if self.hover == Hit::Sounds { BTN_HOVER } else { BTN });
+        let knob_x = if self.sounds { sx + sw - sh / 2.0 } else { sx + sh / 2.0 };
+        fill(pxm, circle(knob_x, sy + sh / 2.0, sh / 2.0 - p(3)), [250, 250, 250, 255]);
         card(pxm, l.hist, p(10));
         let (lx, ly, lw, lh) = rf(l.list);
         if l.list.h > 0 {
@@ -601,6 +654,12 @@ impl Ui {
                 text(hdc, f[F_SMALL], T_GREY, label, R { y: inner.y + px(s, 40), h: px(s, 16), ..inner }, L);
             }
             text(hdc, f[F_BODY], T_GREY, &self.today, l.today, L);
+            text(hdc, f[F_BODY], T_GREY, "Indicator", l.prefs_label, L);
+            for (i, r) in l.styles.iter().enumerate() {
+                let color = if Style::ALL[i] == self.style { T_INK } else { T_WHITE };
+                text(hdc, f[F_BODY], color, Style::ALL[i].label(), *r, L | DT_CENTER);
+            }
+            text(hdc, f[F_BODY], T_GREY, "Sounds", l.sounds_label, L | DT_RIGHT);
             text(hdc, f[F_TITLE], T_WHITE, "History", l.title, L);
             match &self.notice {
                 Some(n) => text(hdc, f[F_BODY], T_GREEN, n, l.notice, L),

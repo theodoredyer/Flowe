@@ -1,20 +1,24 @@
 //! Bottom-center indicator, click-through, never takes focus.
-//! Idle: a tiny dash just above the taskbar meaning "Flowe is listening". Recording: a pill
-//! filled with liquid that rises and sloshes with your voice. Static states are drawn once and
-//! cost nothing; only the animated ones run a timer.
+//! Idle: a tiny dash just above the taskbar meaning "Flowe is listening". Recording: a pill with a
+//! state indicator on the left (red dot = recording, amber padlock = locked) and the chosen
+//! visualization (see viz.rs) on the right. Static states are drawn once and cost nothing; only
+//! the animated ones run a timer.
 
-use tiny_skia::{Mask, Path, PathBuilder, Pixmap, Transform};
+use tiny_skia::{Mask, Pixmap, Transform};
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-use crate::draw::{capsule, circle, fill, fill_masked, rect};
+use crate::draw::{capsule, circle, fill, rect};
+use crate::viz::{Area, Style, Viz};
 use crate::win::wide;
 
 /// Animation timer rate (see TIMER_ANIM in main.rs).
-const FPS: f32 = 60.0;
+pub const FPS: f32 = 60.0;
+/// Length of the preview shown when a style is picked in the dashboard.
+const DEMO_FRAMES: u32 = (FPS * 2.5) as u32;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Idle {
@@ -37,14 +41,11 @@ pub enum View {
 }
 
 const BG: [u8; 4] = [20, 20, 23, 245];
+const WELL: [u8; 4] = [10, 10, 12, 255];
 const FG: [u8; 4] = [250, 250, 250, 255];
 const DIM: [u8; 4] = [113, 113, 122, 255];
+const RED: [u8; 4] = [239, 68, 68, 255];
 const AMBER: [u8; 4] = [245, 158, 11, 255];
-
-/// Liquid layers, back to front: (wavelength px, speed rad/s, phase, amplitude x, y offset px).
-const LAYERS: [(f32, f32, f32, f32, f32); 3] = [(104.0, 2.2, 0.0, 1.0, 0.0), (76.0, -3.0, 1.7, 0.8, 2.0), (140.0, 3.6, 3.1, 0.6, 4.0)];
-const RECORDING: [[u8; 4]; 3] = [[150, 20, 38, 210], [226, 52, 62, 215], [255, 104, 98, 225]];
-const LOCKED: [[u8; 4]; 3] = [[150, 82, 6, 210], [232, 142, 10, 215], [252, 190, 66, 225]];
 
 pub struct Overlay {
     hwnd: HWND,
@@ -52,7 +53,8 @@ pub struct Overlay {
     h: i32,
     s: f32,
     pixmap: Pixmap,
-    /// The full-size capsule the liquid is clipped to.
+    /// The inset the visualization draws into, and its rounded clip.
+    area: Area,
     mask: Mask,
     memdc: HDC,
     dib: HBITMAP,
@@ -61,16 +63,16 @@ pub struct Overlay {
     /// What to fall back to when a recording ends.
     idle: View,
     tick: u32,
-    /// Smoothed loudness 0..1 and animation clock (seconds) for the liquid.
-    smooth: f32,
-    t: f32,
+    viz: Viz,
+    /// Frames left in a dashboard preview (0 = real recording or not animating).
+    demo: u32,
 }
 
 impl Overlay {
-    pub fn new() -> Option<Self> {
+    pub fn new(style: Style) -> Option<Self> {
         unsafe {
             let s = GetDpiForSystem() as f32 / 96.0;
-            let (w, h) = ((208.0 * s) as i32, (44.0 * s) as i32);
+            let (w, h) = ((220.0 * s) as i32, (44.0 * s) as i32);
             let class = wide("flowe-overlay");
             let wc = WNDCLASSW {
                 lpfnWndProc: Some(DefWindowProcW),
@@ -112,14 +114,20 @@ impl Overlay {
                 return None;
             }
             SelectObject(memdc, dib);
+            // Left: a square slot for the state indicator. Right: the visualization inset.
+            let (wf, hf) = (w as f32, h as f32);
+            let pad = 7.0 * s;
+            let ax = hf * 0.92;
+            let area = Area { x: ax, y: pad, w: wf - ax - pad, h: hf - 2.0 * pad };
             let mut mask = Mask::new(w as u32, h as u32)?;
-            mask.fill_path(&capsule(0.0, 0.0, w as f32, h as f32), tiny_skia::FillRule::Winding, true, Transform::identity());
+            mask.fill_path(&capsule(area.x, area.y, area.w, area.h), tiny_skia::FillRule::Winding, true, Transform::identity());
             Some(Self {
                 hwnd,
                 w,
                 h,
                 s,
                 pixmap: Pixmap::new(w as u32, h as u32)?,
+                area,
                 mask,
                 memdc,
                 dib,
@@ -127,14 +135,25 @@ impl Overlay {
                 view: View::Hidden,
                 idle: View::Hidden,
                 tick: 0,
-                smooth: 0.0,
-                t: 0.0,
+                viz: Viz::new(style),
+                demo: 0,
             })
         }
     }
 
+    pub fn set_style(&mut self, style: Style) {
+        self.viz.style = style;
+        self.viz.reset();
+    }
+
+    /// Plays a short preview of the current style with synthetic speech. The caller starts the timer.
+    pub fn demo(&mut self) {
+        self.set(View::Recording);
+        self.demo = DEMO_FRAMES;
+    }
+
     /// What to show when nothing is happening; `None` (paused) shows nothing at all.
-    /// Applies immediately unless a recording is in progress.
+    /// Applies immediately unless a recording or preview is in progress.
     pub fn set_idle(&mut self, idle: Option<Idle>) {
         self.idle = idle.map_or(View::Hidden, View::Idle);
         if matches!(self.view, View::Hidden | View::Idle(_)) {
@@ -150,13 +169,14 @@ impl Overlay {
         let was = self.view;
         self.view = view;
         self.tick = 0;
+        self.demo = 0;
         unsafe {
             if view == View::Hidden {
                 ShowWindow(self.hwnd, SW_HIDE);
                 return;
             }
-            if view == View::Recording {
-                self.smooth = 0.0; // a fresh recording starts with a calm surface
+            if view == View::Recording && was != View::Locked {
+                self.viz.reset(); // a fresh recording starts calm
             }
             self.render(0.0);
             if was == View::Hidden {
@@ -171,6 +191,16 @@ impl Overlay {
         match self.view {
             View::Recording | View::Locked | View::Transcribing => {
                 self.tick += 1;
+                let level = if self.demo > 0 {
+                    self.demo -= 1;
+                    if self.demo == 0 {
+                        self.back_to_idle();
+                        return false;
+                    }
+                    demo_level(self.tick as f32 / FPS)
+                } else {
+                    level
+                };
                 self.render(level);
                 true
             }
@@ -214,25 +244,24 @@ impl Overlay {
                 fill(px, capsule(w / 2.0 - 18.0 * s, h - 5.0 * s, 36.0 * s, 5.0 * s), color);
             }
             View::Recording | View::Locked => {
-                fill(px, capsule(0.0, 0.0, w, h), BG);
-                // Loudness: quick to rise, slow to settle, so the liquid surges and then sloshes back.
-                let target = (level * 10.0).min(1.0);
-                let k = if target > self.smooth { 0.35 } else { 0.06 };
-                self.smooth += (target - self.smooth) * k;
-                self.t += 1.0 / FPS;
-                let colors = if self.view == View::Locked { LOCKED } else { RECORDING };
-                let base = h * (0.74 - 0.40 * self.smooth);
-                let amp = s * (1.2 + 9.0 * self.smooth);
-                for (i, &(wavelength, speed, phase, amp_x, dy)) in LAYERS.iter().enumerate() {
-                    let path = wave(w, h, base + dy * s, amp * amp_x, wavelength * s, speed * self.t + phase);
-                    fill_masked(px, path, colors[i], Some(&self.mask));
+                if self.view == View::Recording || self.view == View::Locked {
+                    self.viz.update(level, 1.0 / FPS);
                 }
-                if self.view == View::Locked {
-                    let (lx, cy) = (w - h / 2.0 - 1.0 * s, h / 2.0);
-                    let hole = [30, 30, 34, 255];
-                    fill(px, capsule(lx - 3.6 * s, cy - 8.0 * s, 7.2 * s, 10.0 * s), FG); // shackle
-                    fill(px, capsule(lx - 2.0 * s, cy - 6.4 * s, 4.0 * s, 8.0 * s), hole);
-                    fill(px, rect(lx - 5.0 * s, cy - 2.5 * s, 10.0 * s, 8.0 * s), FG); // body
+                fill(px, capsule(0.0, 0.0, w, h), BG);
+                let a = self.area;
+                fill(px, capsule(a.x, a.y, a.w, a.h), WELL);
+                self.viz.render(px, &self.mask, a, s);
+                // State indicator, centred in the left slot.
+                let (cx, cy) = (a.x / 2.0 + 1.0 * s, h / 2.0);
+                if self.view == View::Recording {
+                    let halo = 5.0 * s + 5.0 * s * self.viz.energy;
+                    fill(px, circle(cx, cy, halo), [239, 68, 68, (40.0 + 60.0 * self.viz.energy) as u8]);
+                    fill(px, circle(cx, cy, 5.0 * s), RED);
+                } else {
+                    let hole = [20, 20, 23, 255];
+                    fill(px, capsule(cx - 3.6 * s, cy - 8.0 * s, 7.2 * s, 10.0 * s), AMBER); // shackle
+                    fill(px, capsule(cx - 2.0 * s, cy - 6.4 * s, 4.0 * s, 8.0 * s), hole);
+                    fill(px, rect(cx - 5.0 * s, cy - 2.5 * s, 10.0 * s, 8.0 * s), AMBER); // body
                 }
             }
             View::Transcribing => {
@@ -264,23 +293,11 @@ impl Overlay {
     }
 }
 
-/// Liquid body: the area under a wavy surface (a main sine plus a smaller faster harmonic for
-/// a less mechanical look), spanning the full width and down to the bottom.
-fn wave(w: f32, h: f32, base: f32, amp: f32, wavelength: f32, phase: f32) -> Path {
-    let k = std::f32::consts::TAU / wavelength;
-    let y = |x: f32| base + amp * ((k * x + phase).sin() + 0.18 * (1.7 * k * x - 0.9 * phase).sin());
-    let mut pb = PathBuilder::new();
-    pb.move_to(0.0, y(0.0));
-    let mut x = 2.0;
-    while x < w {
-        pb.line_to(x, y(x));
-        x += 2.0;
-    }
-    pb.line_to(w, y(w));
-    pb.line_to(w, h);
-    pb.line_to(0.0, h);
-    pb.close();
-    pb.finish().unwrap_or_else(|| rect(0.0, 0.0, w, h))
+/// Speech-like loudness for previews: bursts of syllables with pauses between phrases.
+pub fn demo_level(t: f32) -> f32 {
+    let syllables = (t * 9.0).sin().abs();
+    let phrase = (0.5 + 0.5 * (t * 1.7).sin()).powi(2);
+    0.005 + 0.09 * syllables * phrase
 }
 
 impl Drop for Overlay {
