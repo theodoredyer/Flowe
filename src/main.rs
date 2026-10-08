@@ -8,6 +8,7 @@ mod history;
 mod hotkey;
 mod icon;
 mod overlay;
+mod pill;
 mod settings;
 mod sound;
 mod tray;

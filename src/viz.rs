@@ -1,4 +1,4 @@
-//! Recording visualizations for the overlay pill. Each style turns mic loudness into motion;
+﻿//! Recording visualizations for the overlay pill. Each style turns mic loudness into motion;
 //! all of them run only while the pill is animating (recording or previewing).
 
 use tiny_skia::{Color, GradientStop, LinearGradient, Mask, Paint, Path, PathBuilder, Pixmap, Point, PremultipliedColorU8, SpreadMode, Stroke, Transform};
@@ -528,7 +528,7 @@ mod tests {
     #[test]
     fn goes_still_when_you_stop_talking() {
         let mut v = Viz::new(Style::Waves);
-        let mut run = |v: &mut Viz, level: f32, secs: f32| {
+        let run = |v: &mut Viz, level: f32, secs: f32| {
             for _ in 0..(secs * 60.0) as usize {
                 v.update(level, 1.0 / 60.0);
             }

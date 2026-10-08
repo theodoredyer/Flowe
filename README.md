@@ -1,24 +1,38 @@
+<div align="center">
+
 # Flowe
 
-Local push-to-talk dictation for Windows, a stand-in for Wispr Flow / FluidVoice.
-Hold **Ctrl+Win**, talk, let go. The audio runs through NVIDIA's **Parakeet TDT 0.6B v2**
-on your GPU, the text is copied to the clipboard and pasted where your cursor is.
+**Hold Ctrl+Win, talk, let go. Your words are pasted where your cursor is.**
+
+Local push-to-talk dictation for Windows, powered by NVIDIA Parakeet on your own GPU.<br>
 No cloud, no account, no usage limits.
 
-- One ~22 MB exe (Rust), nothing to install. Inference via ONNX Runtime + DirectML, so it runs
-  on any Windows GPU without CUDA, and falls back to CPU.
-- Idle cost is zero: the mic is closed, no timers run, CPU sits at 0.00%. Only the keyboard
-  hook is alive. Pausing removes even that.
-- A tiny dash just above the taskbar means it is listening. While recording it becomes a pill with
-  a state indicator (red dot = recording, amber padlock = locked) and a visualization you pick in
-  the dashboard: **Waves** (level bars), **Liquid** (spring-based water sim with splashes and
-  droplets), **Plasma** (colour field that speeds up and gains contrast as you talk) or
-  **Lava lamp** (merging glowing blobs). Picking one plays a short preview.
-- Soft "thock" sounds (like a creamy mechanical keyboard) play when recording starts and stops,
-  and a double-tap confirms Space-lock
-  (switch in the dashboard). Plasma builds a random colour palette every recording.
-- An "F" badge sits in the tray, and the dashboard window (opens on launch, closing it
-  only hides it) has pause/resume, your recording history and usage stats.
+<img src="docs/flow.gif" width="520" alt="The idle dash above the taskbar turns into a recording pill with a moving plasma visualization, locks hands-free, transcribes, and returns to idle">
+
+</div>
+
+## Why
+
+Wispr Flow has usage limits and FluidVoice is Mac-only. Flowe does the one thing they do,
+locally:
+
+- **Fast and private.** Parakeet TDT 0.6B v2 runs through ONNX Runtime + DirectML on any Windows
+  GPU (no CUDA needed, CPU fallback). A 10 s clip transcribes in ~0.3 s on an RTX 4070.
+- **Weightless when idle.** One ~22 MB Rust exe. The mic is closed and no timers run, so CPU sits at
+  0.00% until you press the hotkey. Pausing unhooks even the keyboard.
+- **Out of the way.** A tiny dash above the taskbar says it's listening. It becomes a pill while you
+  talk, with soft keyboard-"thock" sounds on start, stop and lock.
+
+## Pick your visualization
+
+Each one reacts to your voice, scales itself to how loud you talk, and settles the moment you stop.
+
+| | |
+|:-:|:-:|
+| <img src="docs/waves.gif" width="380" alt="Waves visualization"><br>**Waves**: level bars | <img src="docs/liquid.gif" width="380" alt="Liquid visualization"><br>**Liquid**: spring-physics water with splashes |
+| <img src="docs/plasma.gif" width="380" alt="Plasma visualization across three recordings, each in different colours"><br>**Plasma**: new random colours every recording | <img src="docs/lava.gif" width="380" alt="Lava lamp visualization"><br>**Lava lamp**: merging glowing blobs |
+
+Red dot = recording, amber padlock = locked hands-free. Pick a style in the dashboard to preview it.
 
 ## Controls
 
@@ -27,17 +41,18 @@ No cloud, no account, no usage limits.
 | Hold **Ctrl+Win** | records while held, pastes when you let go |
 | ...then tap **Space** | locks: keeps recording hands-free; press Ctrl+Win again to stop |
 | **Esc** while locked | cancels |
-| Ctrl+Win + any other key | cancels and passes through, so Ctrl+Win+Left etc still work |
-| Tray icon, left-click | opens the dashboard (so does launching Flowe again) |
-| Tray icon, right-click | Open / Pause listening / Open log / Quit |
+| Ctrl+Win + any other key | cancels and passes through, so Ctrl+Win+Left etc. still work |
 
-Taps shorter than 0.3 s are ignored. A forgotten locked recording stops itself after 5 minutes.
-Double-clicking a row in the history copies it to the clipboard again.
+Taps under 0.3 s are ignored, and a forgotten locked recording stops itself after 5 minutes.
+The transcript also stays on the clipboard.
+
+**Dashboard** (opens on launch, or click the tray badge): pause/resume, recording history
+(double-click a row to copy it again), word counts and usage stats, indicator style, sounds on/off.
 
 ## Install
 
-Only building needs tools: `winget install Rustlang.Rustup Microsoft.VisualStudio.2022.BuildTools`
-(with the "Desktop development with C++" workload, which includes the Windows SDK for `rc.exe`).
+Building needs Rust and the MSVC build tools:
+`winget install Rustlang.Rustup Microsoft.VisualStudio.2022.BuildTools` (with the "Desktop development with C++" workload).
 
 ```powershell
 cargo build --release
@@ -45,25 +60,35 @@ cargo build --release
 .\install.ps1          # copies the exe to %LOCALAPPDATA%\Flowe, adds a Start Menu entry, launches
 ```
 
-After that, press the Windows key and type "Flowe" to start it. `.\install.ps1 -Startup` also
-launches it at sign-in, hidden in the tray (`flowe.exe --tray`); `.\install.ps1 -Uninstall`
-removes the shortcuts. `cargo run --release --bin mkicon` regenerates the app icon. Quit Wispr Flow (or change
-its hotkey) first, or both apps will react to Ctrl+Win.
+Then press the Windows key and type "Flowe". Quit Wispr Flow first (or change its hotkey), or both
+will react to Ctrl+Win.
 
-## Files in `%LOCALAPPDATA%\Flowe\`
+- `.\install.ps1 -Startup` also launches Flowe hidden at sign-in. `.\install.ps1 -Uninstall` removes the shortcuts.
 
-- `model\` — the ONNX model
-- `history.tsv` — your recordings: time, audio length, transcription time, word count, text.
-  Plain text, so it is readable and greppable; "Clear history" deletes it.
-- `flowe.log` — timings and errors only, never transcript text
-- `settings.txt` — indicator style and sounds on/off
+<details>
+<summary><b>Files, notes and dev commands</b></summary>
 
-## Notes
+**`%LOCALAPPDATA%\Flowe\`**
 
-- RAM sits around 400 MB while idle: that is the model staying loaded so transcription is
-  instant. Transcribing a 10 s clip takes about 0.3 s on an RTX 4070.
-- Apps running as Administrator will not receive the paste unless Flowe runs elevated too.
-- The dashboard is dark-only (custom drawn), with a dark title bar on Windows 11.
-- `assets/nemo128.onnx` (mel-spectrogram preprocessor) comes from
-  [onnx-asr](https://github.com/istupakov/onnx-asr), MIT; the model export is
-  [istupakov/parakeet-tdt-0.6b-v2-onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx), CC-BY-4.0.
+- `model\`: the ONNX model.
+- `history.tsv`: your recordings (time, audio length, transcription time, words, text). "Clear history" deletes it.
+- `flowe.log`: timings and errors only, never transcript text.
+- `settings.txt`: indicator style and sounds on/off.
+
+**Notes**
+
+- About 400 MB of RAM while idle: that is the model staying loaded so transcription is instant.
+- Apps running as Administrator only receive the paste if Flowe runs elevated too.
+
+**Dev commands**
+
+- `cargo test`: runs the unit tests.
+- `cargo run --release --bin mkicon`: regenerates the app icon.
+- `cargo run --release --features demo --bin demo`: re-renders the GIFs above with the real overlay code.
+
+**Credits**
+
+- `assets/nemo128.onnx` (mel preprocessor) comes from [onnx-asr](https://github.com/istupakov/onnx-asr), MIT.
+- The model export is [istupakov/parakeet-tdt-0.6b-v2-onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx), CC-BY-4.0.
+
+</details>
