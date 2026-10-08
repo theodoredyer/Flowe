@@ -55,7 +55,7 @@ its hotkey) first, or both apps will react to Ctrl+Win.
 - RAM sits around 400 MB while idle: that is the model staying loaded so transcription is
   instant. Transcribing a 10 s clip takes about 0.3 s on an RTX 4070.
 - Apps running as Administrator will not receive the paste unless parakey runs elevated too.
-- The window follows the light theme only.
+- The dashboard is dark-only (custom drawn), with a dark title bar on Windows 11.
 - `assets/nemo128.onnx` (mel-spectrogram preprocessor) comes from
   [onnx-asr](https://github.com/istupakov/onnx-asr), MIT; the model export is
   [istupakov/parakeet-tdt-0.6b-v2-onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx), CC-BY-4.0.

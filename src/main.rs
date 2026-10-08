@@ -17,9 +17,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::*;
-use windows_sys::Win32::Graphics::Gdi::HDC;
-use windows_sys::Win32::UI::Controls::{NM_DBLCLK, NMHDR};
 use windows_sys::Win32::UI::HiDpi::*;
+use windows_sys::Win32::Graphics::Gdi::ValidateRect;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -27,7 +27,7 @@ use history::{Entry, History};
 use hotkey::Action;
 use overlay::{Idle, Overlay, View};
 use tray::{Status, Tray};
-use ui::Ui;
+use ui::{Ui, UiEvent};
 use win::wide;
 
 const WM_ACTION: u32 = WM_APP + 1; // wparam: hotkey::Action
@@ -36,6 +36,7 @@ const WM_TRAY: u32 = WM_APP + 3;
 const WM_AUTOSTOP: u32 = WM_APP + 4;
 const TIMER_ANIM: usize = 1;
 const TIMER_FLASH: usize = 2;
+const WM_MOUSELEAVE: u32 = 0x02A3; // not re-exported by windows-sys where the other WM_ consts are
 const MIN_HOLD: Duration = Duration::from_millis(300);
 const ID_QUIT: usize = 1;
 const ID_LOG: usize = 2;
@@ -96,7 +97,7 @@ impl App {
         unsafe { SetTimer(self.hwnd, TIMER_ANIM, 33, None) };
     }
 
-    /// Push the current state to the tray icon, tooltip, idle dash and window header.
+    /// Push the current state to the tray icon, tooltip, idle dash and dashboard header.
     fn sync(&mut self) {
         let (status, tip, text, button, idle) = if self.paused {
             (Status::Paused, "parakey - paused", "Paused. Ctrl+Win does nothing until you resume.", "Resume", None)
@@ -116,7 +117,7 @@ impl App {
             }
         };
         self.tray.set(status, Some(tip));
-        self.ui.set_status(text, button);
+        self.ui.set_status(status, text, button);
         self.overlay.set_idle(idle);
     }
 
@@ -215,7 +216,7 @@ impl App {
             && !text.is_empty()
             && win::set_clipboard(self.hwnd, &text)
         {
-            self.ui.set_status("Copied to clipboard.", if self.paused { "Resume" } else { "Pause" });
+            self.ui.set_notice(Some("Copied to clipboard"));
             unsafe { SetTimer(self.hwnd, TIMER_FLASH, 1500, None) };
         }
     }
@@ -264,19 +265,11 @@ fn open_log() {
 fn run_command(hwnd: HWND, cmd: usize) {
     match cmd {
         ID_OPEN => with_app(|app| app.ui.show()),
-        ID_TOGGLE | ui::ID_PAUSE => with_app(|app| app.set_paused(!app.paused)),
+        ID_TOGGLE => with_app(|app| app.set_paused(!app.paused)),
         ID_LOG => open_log(),
         ID_QUIT => unsafe {
             DestroyWindow(hwnd);
         },
-        ui::ID_CLEAR => {
-            let yes = unsafe {
-                MessageBoxW(hwnd, wide("Delete all recording history and stats?").as_ptr(), wide("parakey").as_ptr(), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2)
-            };
-            if yes == IDYES {
-                with_app(|app| app.clear_history());
-            }
-        }
         _ => {}
     }
 }
@@ -302,8 +295,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }),
         WM_TIMER if wparam == TIMER_FLASH => {
             unsafe { KillTimer(hwnd, TIMER_FLASH) };
-            with_app(|app| app.sync());
+            with_app(|app| app.ui.set_notice(None));
         }
+        WM_TIMER if wparam == ui::TIMER_UI => with_app(|app| app.ui.tick()),
         WM_TRAY => match (lparam & 0xFFFF) as u32 {
             WM_LBUTTONUP => run_command(hwnd, ID_OPEN),
             WM_RBUTTONUP => {
@@ -314,15 +308,40 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             _ => {}
         },
-        WM_COMMAND => run_command(hwnd, wparam & 0xFFFF),
-        WM_NOTIFY => {
-            // SAFETY: WM_NOTIFY's lparam always points to an NMHDR.
-            let nm = unsafe { &*(lparam as *const NMHDR) };
-            if nm.idFrom == ui::ID_LIST && nm.code == NM_DBLCLK {
-                with_app(|app| app.copy_selected());
+        WM_PAINT => {
+            let mut painted = false;
+            with_app(|app| {
+                app.ui.paint();
+                painted = true;
+            });
+            if !painted {
+                unsafe { ValidateRect(hwnd, core::ptr::null()) }; // never leave the region dirty
             }
         }
-        WM_SIZE => with_app(|app| app.ui.layout()),
+        WM_ERASEBKGND => return 1, // the paint covers everything
+        WM_SIZE => with_app(|app| app.ui.on_size()),
+        WM_MOUSEMOVE | WM_MOUSELEAVE | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_LBUTTONDBLCLK | WM_MOUSEWHEEL => {
+            let mut ev = UiEvent::None;
+            with_app(|app| ev = app.ui.on_mouse(msg, wparam, lparam));
+            match ev {
+                UiEvent::TogglePause => with_app(|app| app.set_paused(!app.paused)),
+                UiEvent::ClearHistory => with_app(|app| app.clear_history()),
+                UiEvent::CopyRow => with_app(|app| app.copy_selected()),
+                UiEvent::None => {}
+            }
+        }
+        WM_SETCURSOR if (lparam & 0xFFFF) as u32 == HTCLIENT => {
+            let mut hand = false;
+            with_app(|app| hand = app.ui.hand_cursor());
+            if !hand {
+                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            }
+            unsafe { SetCursor(LoadCursorW(core::ptr::null_mut(), IDC_HAND)) };
+            return 1;
+        }
+        WM_KEYDOWN if wparam as u16 == VK_ESCAPE => unsafe {
+            ShowWindow(hwnd, SW_HIDE);
+        },
         WM_GETMINMAXINFO => {
             let mut size = (0, 0);
             with_app(|app| size = app.ui.min_size());
@@ -331,14 +350,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 let mmi = unsafe { &mut *(lparam as *mut MINMAXINFO) };
                 mmi.ptMinTrackSize = POINT { x: size.0, y: size.1 };
             }
-        }
-        WM_CTLCOLORSTATIC => {
-            let mut brush = core::ptr::null_mut();
-            with_app(|app| brush = app.ui.static_brush(wparam as HDC, lparam as HWND));
-            if !brush.is_null() {
-                return brush as LRESULT;
-            }
-            return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
         }
         // Taskbar moved/resized or monitors changed: keep the dash just above the taskbar.
         WM_DISPLAYCHANGE | WM_SETTINGCHANGE => with_app(|app| app.overlay.place()),
@@ -440,7 +451,7 @@ fn main() {
     win::log("starting");
     unsafe {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_SYSTEM_AWARE);
-        let Some(ui) = Ui::new(Some(wndproc)) else {
+        let Some(mut ui) = Ui::new(Some(wndproc)) else {
             win::log("failed to create window");
             return;
         };
