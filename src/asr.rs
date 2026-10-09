@@ -4,6 +4,8 @@
 //! (GPU via DirectML) -> greedy TDT decoding with the decoder/joint network (CPU, tiny).
 
 use std::path::Path;
+use std::sync::Mutex;
+use std::time::Instant;
 
 use ort::ep::DirectML;
 use ort::session::Session;
@@ -28,6 +30,9 @@ pub struct Parakeet {
     dec: Session,
     vocab: Vec<String>,
     blank: usize,
+    /// Seconds each stage took per second of audio, learned from recent runs (for `Progress`).
+    enc_rate: f32,
+    dec_rate: f32,
 }
 
 fn cpu_builder() -> Result<SessionBuilder, Error> {
@@ -55,11 +60,36 @@ impl Parakeet {
             .with_memory_pattern(false)?
             .commit_from_file(dir.join("encoder-model.onnx"))?;
         let dec = cpu_builder()?.commit_from_file(dir.join("decoder_joint-model.onnx"))?;
-        Ok(Self { pre, enc, dec, vocab, blank })
+        Ok(Self { pre, enc, dec, vocab, blank, enc_rate: 0.012, dec_rate: 0.02 })
     }
 
-    /// `audio`: mono 16 kHz samples in [-1, 1].
-    pub fn transcribe(&mut self, audio: &[f32]) -> Result<String, Error> {
+    /// `audio`: mono 16 kHz samples in [-1, 1]. `progress`, if given, is kept up to date while
+    /// this runs and cleared when it's done.
+    pub fn transcribe(&mut self, audio: &[f32], progress: Option<&SharedProgress>) -> Result<String, Error> {
+        let report = |f: &dyn Fn(&mut Option<Progress>)| {
+            if let Some(Ok(mut p)) = progress.map(Mutex::lock) {
+                f(&mut p);
+            }
+        };
+        let secs = audio.len() as f32 / 16000.0;
+        let started = Instant::now();
+        let (enc_s, dec_s) = (self.enc_rate * secs + 0.03, self.dec_rate * secs + 0.01);
+        report(&|p| *p = Some(Progress { start: started, encode_s: enc_s, encode_share: enc_s / (enc_s + dec_s), decoded: None }));
+        let result = self.run(audio, &report);
+        report(&|p| *p = None);
+        if secs >= 2.0
+            && let Ok((_, decode_start)) = &result
+        {
+            // Learn this machine's speed; the bar's pacing gets better with use.
+            let (enc, dec) = ((*decode_start - started).as_secs_f32(), decode_start.elapsed().as_secs_f32());
+            self.enc_rate = 0.5 * self.enc_rate + 0.5 * enc / secs;
+            self.dec_rate = 0.5 * self.dec_rate + 0.5 * dec / secs;
+        }
+        result.map(|(text, _)| text)
+    }
+
+    /// The pipeline; returns the text and when decoding started.
+    fn run(&mut self, audio: &[f32], report: &dyn Fn(&dyn Fn(&mut Option<Progress>))) -> Result<(String, Instant), Error> {
         // 1. features [1, 128, T]
         let out = self.pre.run(ort::inputs![
             "waveforms" => Tensor::from_array(([1usize, audio.len()], audio.to_vec()))?,
@@ -90,6 +120,9 @@ impl Parakeet {
         drop(out);
 
         // 3. greedy TDT decoding
+        let decode_start = Instant::now();
+        report(&|p| p.iter_mut().for_each(|p| p.decoded = Some(0.0)));
+        let mut reported = 0usize;
         let vocab_size = self.vocab.len();
         let mut s1 = vec![0f32; STATE_SIZE];
         let mut s2 = vec![0f32; STATE_SIZE];
@@ -121,10 +154,42 @@ impl Parakeet {
                 t += 1;
                 emitted = 0;
             }
+            if (t - reported) * 50 >= len {
+                // every 2%
+                reported = t;
+                let f = t.min(len) as f32 / len as f32;
+                report(&|p| p.iter_mut().for_each(|p| p.decoded = Some(f)));
+            }
         }
 
         let joined: String = tokens.iter().map(|&i| self.vocab[i].as_str()).collect();
-        Ok(fix_spaces(&joined))
+        Ok((fix_spaces(&joined), decode_start))
+    }
+}
+
+/// How far along a transcription is, for the overlay's progress bar. The encoder is one opaque
+/// GPU call, so its share is paced by how long it took last time; decoding reports real progress.
+pub struct Progress {
+    start: Instant,
+    /// Expected encoder time, and its share of the whole.
+    encode_s: f32,
+    encode_share: f32,
+    /// Fraction of frames decoded, once decoding has started.
+    decoded: Option<f32>,
+}
+
+pub type SharedProgress = Mutex<Option<Progress>>;
+
+impl Progress {
+    /// 0..1. While encoding it follows the clock but eases off near the encoder's share rather
+    /// than stalling or overrunning if this run is slower than expected.
+    pub fn fraction(&self) -> f32 {
+        if let Some(d) = self.decoded {
+            return self.encode_share + (1.0 - self.encode_share) * d;
+        }
+        let x = self.start.elapsed().as_secs_f32() / self.encode_s.max(0.01);
+        let x = if x < 0.8 { x } else { 0.8 + 0.2 * (1.0 - (-(x - 0.8) / 0.2).exp()) };
+        self.encode_share * x
     }
 }
 
@@ -169,9 +234,9 @@ mod e2e {
         let (pcm, rate) = crate::audio::read_wav_pcm16(std::path::Path::new(&path)).unwrap();
         let audio = crate::audio::resample(&pcm, rate, 16000);
         let mut m = super::Parakeet::load(&crate::win::data_dir().join("model")).unwrap();
-        m.transcribe(&audio[..16000]).unwrap(); // warm-up
+        m.transcribe(&audio[..16000], None).unwrap(); // warm-up
         let t = std::time::Instant::now();
-        let text = m.transcribe(&audio).unwrap();
+        let text = m.transcribe(&audio, None).unwrap();
         println!("{rate} Hz, {:.1}s audio -> {:.3}s: {text:?}", pcm.len() as f32 / rate as f32, t.elapsed().as_secs_f32());
         assert!(text.to_lowercase().contains("local dictation"));
     }

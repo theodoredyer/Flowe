@@ -185,6 +185,13 @@ impl Viz {
         (self.rng >> 8) as f32 / (1u32 << 24) as f32
     }
 
+    /// A bright colour from this recording's plasma palette, cycling smoothly as `k` goes 0..1
+    /// (skips the dark shade, so it reads on the black pill).
+    pub fn tint(&self, k: f32) -> [f32; 3] {
+        let tri = 1.0 - (2.0 * k.rem_euclid(1.0) - 1.0).abs();
+        ramp(&self.palette, 0.25 + 0.5 * tri)
+    }
+
     pub fn render(&mut self, px: &mut Pixmap, mask: &Mask, a: Area, s: f32) {
         match self.style {
             Style::Waves => self.waves(px, a, s),
@@ -404,7 +411,7 @@ impl Viz {
 
 /// Per-pixel painter over `a`, clipped by `mask` and composited over what is already there.
 /// `f` returns (rgb 0..1, alpha 0..1).
-fn shade(px: &mut Pixmap, mask: &Mask, a: Area, mut f: impl FnMut(f32, f32) -> ([f32; 3], f32)) {
+pub fn shade(px: &mut Pixmap, mask: &Mask, a: Area, mut f: impl FnMut(f32, f32) -> ([f32; 3], f32)) {
     let pw = px.width() as usize;
     let ph = px.height() as usize;
     let cov = mask.data();
@@ -442,7 +449,7 @@ fn ramp(stops: &[[f32; 3]; 5], k: f32) -> [f32; 3] {
     [0, 1, 2].map(|j| stops[i][j] + (stops[i + 1][j] - stops[i][j]) * t)
 }
 
-fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+pub fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }

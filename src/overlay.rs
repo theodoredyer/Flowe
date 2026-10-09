@@ -1,8 +1,9 @@
 //! Bottom-center indicator, click-through, never takes focus.
 //! Idle: a tiny dash just above the taskbar meaning "Flowe is listening". Recording: a pill with a
 //! state indicator on the left (red dot = recording, amber padlock = locked) and the chosen
-//! visualization (see viz.rs) on the right. The drawing lives in pill.rs; this file puts it on
-//! screen. Static states are drawn once and cost nothing; only the animated ones run a timer.
+//! visualization (see viz.rs) on the right; transcribing: the chosen loader (loader.rs). The
+//! drawing and the morphs between them live in pill.rs; this file puts it on screen. Static
+//! states are drawn once and cost nothing; the timer only runs while something moves.
 
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
@@ -10,22 +11,27 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
+use crate::loader::Loader;
 pub use crate::pill::{FPS, Idle, View};
-use crate::pill::{Pill, demo_level};
+use crate::pill::{Pill, demo_level, demo_progress};
 use crate::viz::Style;
 use crate::win::wide;
 
-/// Length of the preview shown when a style is picked in the dashboard.
-const DEMO_FRAMES: u32 = (FPS * 2.5) as u32;
+/// Animation timer id, posted to the window passed to `Overlay::new`; call `tick` on each.
+pub const TIMER: usize = 1;
+/// Length of the preview shown when a style or loader is picked in the dashboard.
+const DEMO_SECS: f32 = 2.5;
 
 pub struct Overlay {
     hwnd: HWND,
+    /// Receives the animation timer.
+    owner: HWND,
     s: f32,
     pill: Pill,
     memdc: HDC,
     dib: HBITMAP,
     bits: *mut u8,
-    pub view: View,
+    shown: bool,
     /// What to fall back to when a recording ends.
     idle: View,
     tick: u32,
@@ -34,10 +40,10 @@ pub struct Overlay {
 }
 
 impl Overlay {
-    pub fn new(style: Style) -> Option<Self> {
+    pub fn new(style: Style, loader: Loader, owner: HWND) -> Option<Self> {
         unsafe {
             let s = GetDpiForSystem() as f32 / 96.0;
-            let pill = Pill::new(s, style)?;
+            let pill = Pill::new(s, style, loader)?;
             let (w, h) = (pill.w, pill.h);
             let class = wide("flowe-overlay");
             let wc = WNDCLASSW {
@@ -80,19 +86,12 @@ impl Overlay {
                 return None;
             }
             SelectObject(memdc, dib);
-            Some(Self {
-                hwnd,
-                s,
-                pill,
-                memdc,
-                dib,
-                bits: bits as *mut u8,
-                view: View::Hidden,
-                idle: View::Hidden,
-                tick: 0,
-                demo: 0,
-            })
+            Some(Self { hwnd, owner, s, pill, memdc, dib, bits: bits as *mut u8, shown: false, idle: View::Hidden, tick: 0, demo: 0 })
         }
+    }
+
+    pub fn view(&self) -> View {
+        self.pill.view()
     }
 
     pub fn set_style(&mut self, style: Style) {
@@ -100,17 +99,28 @@ impl Overlay {
         self.pill.viz.reset();
     }
 
-    /// Plays a short preview of the current style with synthetic speech. The caller starts the timer.
+    pub fn set_loader(&mut self, loader: Loader) {
+        self.pill.set_loader(loader);
+    }
+
+    /// Plays a short preview of the current style with synthetic speech.
     pub fn demo(&mut self) {
         self.set(View::Recording);
-        self.demo = DEMO_FRAMES;
+        self.demo = (FPS * DEMO_SECS) as u32;
+    }
+
+    /// Plays a short preview of the current loader with made-up progress.
+    pub fn demo_loader(&mut self) {
+        self.pill.viz.reset(); // fresh colours, as a real recording would have
+        self.set(View::Transcribing);
+        self.demo = (FPS * DEMO_SECS) as u32;
     }
 
     /// What to show when nothing is happening; `None` (paused) shows nothing at all.
     /// Applies immediately unless a recording or preview is in progress.
     pub fn set_idle(&mut self, idle: Option<Idle>) {
         self.idle = idle.map_or(View::Hidden, View::Idle);
-        if matches!(self.view, View::Hidden | View::Idle(_)) {
+        if matches!(self.view(), View::Hidden | View::Idle(_)) {
             self.set(self.idle);
         }
     }
@@ -119,55 +129,62 @@ impl Overlay {
         self.set(self.idle);
     }
 
+    /// Switches view (morphing to it) and makes sure the animation timer runs while needed.
     pub fn set(&mut self, view: View) {
-        let was = self.view;
-        self.view = view;
+        let was = self.view();
+        if view == was {
+            return;
+        }
         self.tick = 0;
         self.demo = 0;
+        if view == View::Recording && was != View::Locked {
+            self.pill.viz.reset(); // a fresh recording starts calm
+        }
+        self.pill.show(view);
+        self.render(0.0);
         unsafe {
-            if view == View::Hidden {
-                ShowWindow(self.hwnd, SW_HIDE);
-                return;
-            }
-            if view == View::Recording && was != View::Locked {
-                self.pill.viz.reset(); // a fresh recording starts calm
-            }
-            self.render(0.0);
-            if was == View::Hidden {
+            if !self.shown && view != View::Hidden {
                 self.place();
                 ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+                self.shown = true;
+            }
+            if self.pill.animating() || view == View::Flash || (view == View::Hidden && self.shown) {
+                SetTimer(self.owner, TIMER, 16, None);
             }
         }
     }
 
-    /// Called by the animation timer. Returns false when nothing animates (timer can stop).
-    pub fn tick(&mut self, level: f32) -> bool {
-        match self.view {
-            View::Recording | View::Locked | View::Transcribing => {
-                self.tick += 1;
-                let level = if self.demo > 0 {
-                    self.demo -= 1;
-                    if self.demo == 0 {
-                        self.back_to_idle();
-                        return false;
-                    }
-                    demo_level(self.tick as f32 / FPS)
-                } else {
-                    level
-                };
-                self.render(level);
-                true
-            }
-            View::Flash if self.tick >= FPS as u32 => {
+    /// Called by the animation timer with the mic level and transcription progress (0..1).
+    /// Returns false when nothing animates (timer can stop).
+    pub fn tick(&mut self, level: f32, progress: f32) -> bool {
+        self.tick += 1;
+        let (mut level, mut progress) = (level, progress);
+        if self.demo > 0 {
+            self.demo -= 1;
+            if self.demo == 0 {
                 self.back_to_idle();
-                false
+                return true;
             }
-            View::Flash => {
-                self.tick += 1;
-                true
-            }
-            View::Hidden | View::Idle(_) => false,
+            let t = self.tick as f32 / FPS;
+            (level, progress) = (demo_level(t), demo_progress(t, DEMO_SECS * 0.9));
         }
+        let view = self.view();
+        if view == View::Flash && self.tick >= FPS as u32 {
+            self.back_to_idle();
+            return true;
+        }
+        if view == View::Transcribing {
+            self.pill.progress = progress;
+        }
+        if self.pill.animating() {
+            self.render(level);
+            return true;
+        }
+        if view == View::Hidden && self.shown {
+            unsafe { ShowWindow(self.hwnd, SW_HIDE) }; // the dash has faded out
+            self.shown = false;
+        }
+        view == View::Flash
     }
 
     /// Bottom-center of the primary monitor's work area, just above the taskbar.
@@ -182,10 +199,7 @@ impl Overlay {
     }
 
     fn render(&mut self, level: f32) {
-        if self.view == View::Hidden {
-            return;
-        }
-        self.pill.paint(self.view, level, self.tick);
+        self.pill.paint(level);
         self.present();
     }
 

@@ -14,6 +14,8 @@ use windows_sys::core::PCWSTR;
 
 use crate::draw::{capsule, circle, fill, rect, rounded_rect};
 use crate::history::{Entry, History, fmt_duration};
+use crate::loader::Loader;
+use crate::settings::Settings;
 use crate::tray::Status;
 use crate::viz::Style;
 use crate::win::wide;
@@ -60,6 +62,7 @@ enum Hit {
     Row(usize),
     Thumb,
     Style(usize),
+    Loader(usize),
     Sounds,
 }
 
@@ -69,6 +72,7 @@ pub enum UiEvent {
     ClearHistory,
     CopyRow,
     SetStyle(Style),
+    SetLoader(Loader),
     ToggleSounds,
 }
 
@@ -100,6 +104,8 @@ struct Layout {
     today: R,
     prefs_label: R,
     styles: [R; 4],
+    loader_label: R,
+    loaders: [R; 4],
     sounds_label: R,
     sounds: R,
     hist: R,
@@ -140,6 +146,7 @@ pub struct Ui {
     clear_armed: bool,
     clear_w: i32,
     style: Style,
+    loader: Loader,
     sounds: bool,
 }
 
@@ -246,6 +253,7 @@ impl Ui {
                 clear_armed: false,
                 clear_w: px(s, 100),
                 style: Style::Waves,
+                loader: Loader::Progress,
                 sounds: true,
             })
         }
@@ -260,9 +268,10 @@ impl Ui {
         self.repaint();
     }
 
-    pub fn set_prefs(&mut self, style: Style, sounds: bool) {
-        self.style = style;
-        self.sounds = sounds;
+    pub fn set_prefs(&mut self, s: &Settings) {
+        self.style = s.style;
+        self.loader = s.loader;
+        self.sounds = s.sounds;
         self.repaint();
     }
 
@@ -273,12 +282,8 @@ impl Ui {
 
     pub fn set_stats(&mut self, h: &History) {
         let st = h.stats();
-        self.stats = [
-            thousands(st.recordings),
-            thousands(st.words),
-            fmt_duration(st.audio_ms),
-            if st.audio_ms > 0 { format!("{:.0}", st.wpm()) } else { "–".into() },
-        ];
+        self.stats =
+            [thousands(st.recordings), thousands(st.words), fmt_duration(st.audio_ms), if st.audio_ms > 0 { format!("{:.0}", st.wpm()) } else { "–".into() }];
         self.today = if st.recordings == 0 {
             String::new()
         } else {
@@ -313,7 +318,7 @@ impl Ui {
     }
 
     pub fn min_size(&self) -> (i32, i32) {
-        (px(self.s, 640), px(self.s, 480))
+        (px(self.s, 640), px(self.s, 520))
     }
 
     pub fn show(&self) {
@@ -324,7 +329,7 @@ impl Ui {
     }
 
     pub fn hand_cursor(&self) -> bool {
-        matches!(self.hover, Hit::Pause | Hit::Clear | Hit::Row(_) | Hit::Style(_) | Hit::Sounds)
+        matches!(self.hover, Hit::Pause | Hit::Clear | Hit::Row(_) | Hit::Style(_) | Hit::Loader(_) | Hit::Sounds)
     }
 
     /// TIMER_UI: the "confirm clear?" state expires.
@@ -362,7 +367,10 @@ impl Ui {
         let styles = [0, 1, 2, 3].map(|i| R { x: m + p(74) + i * (seg_w + seg_gap), y: row_y, w: seg_w, h: p(30) });
         let sounds = R { x: w - m - p(40), y: row_y + p(5), w: p(40), h: p(20) };
         let sounds_label = R { x: sounds.x - p(70), y: row_y, w: p(62), h: p(30) };
-        let hist = R { x: m, y: p(226), w: w - 2 * m, h: (h - p(226) - m).max(p(120)) };
+        let loader_y = row_y + p(38);
+        let loader_label = R { y: loader_y, ..prefs_label };
+        let loaders = styles.map(|r| R { y: loader_y, ..r });
+        let hist = R { x: m, y: p(264), w: w - 2 * m, h: (h - p(264) - m).max(p(120)) };
         let title = R { x: hist.x + p(14), y: hist.y + p(10), w: p(70), h: p(22) };
         let clear = R { x: hist.x + hist.w - p(14) - self.clear_w, y: hist.y + p(10), w: self.clear_w, h: p(22) };
         let notice = R { x: title.x + title.w, y: title.y, w: (clear.x - title.x - title.w - p(12)).max(10), h: title.h };
@@ -386,6 +394,8 @@ impl Ui {
             today,
             prefs_label,
             styles,
+            loader_label,
+            loaders,
             sounds_label,
             sounds,
             hist,
@@ -410,6 +420,8 @@ impl Ui {
             Hit::Clear
         } else if let Some(i) = l.styles.iter().position(|r| r.contains(x, y)) {
             Hit::Style(i)
+        } else if let Some(i) = l.loaders.iter().position(|r| r.contains(x, y)) {
+            Hit::Loader(i)
         } else if l.sounds.contains(x, y) || l.sounds_label.contains(x, y) {
             Hit::Sounds
         } else if l.thumb.is_some_and(|t| t.contains(x, y)) {
@@ -467,6 +479,7 @@ impl Ui {
             WM_LBUTTONDOWN => match self.hit(x, y) {
                 Hit::Pause => return UiEvent::TogglePause,
                 Hit::Style(i) => return UiEvent::SetStyle(Style::ALL[i]),
+                Hit::Loader(i) => return UiEvent::SetLoader(Loader::ALL[i]),
                 Hit::Sounds => return UiEvent::ToggleSounds,
                 Hit::Clear => {
                     if self.clear_armed {
@@ -543,7 +556,9 @@ impl Ui {
             bmi.bmiHeader.biBitCount = 32;
             let mut bits = core::ptr::null_mut();
             let dib = CreateDIBSection(self.memdc, &bmi, DIB_RGB_COLORS, &mut bits, core::ptr::null_mut(), 0);
-            let Some(pixmap) = Pixmap::new(w as u32, h as u32) else { return false };
+            let Some(pixmap) = Pixmap::new(w as u32, h as u32) else {
+                return false;
+            };
             if dib.is_null() || bits.is_null() {
                 return false;
             }
@@ -564,7 +579,9 @@ impl Ui {
         let l = self.layout();
         let s = self.s;
         let p = |v: i32| px(s, v) as f32;
-        let Some(px_) = self.pixmap.as_mut() else { return };
+        let Some(px_) = self.pixmap.as_mut() else {
+            return;
+        };
         let pxm = px_;
 
         // --- shapes ---
@@ -592,8 +609,29 @@ impl Ui {
             };
             fill(pxm, capsule(x, y, w, h), color);
         }
+        for (i, r) in l.loaders.iter().enumerate() {
+            let (x, y, w, h) = rf(*r);
+            let color = if Loader::ALL[i] == self.loader {
+                SELECTED
+            } else if self.hover == Hit::Loader(i) {
+                BTN_HOVER
+            } else {
+                BTN
+            };
+            fill(pxm, capsule(x, y, w, h), color);
+        }
         let (sx, sy, sw, sh) = rf(l.sounds);
-        fill(pxm, capsule(sx, sy, sw, sh), if self.sounds { GREEN } else if self.hover == Hit::Sounds { BTN_HOVER } else { BTN });
+        fill(
+            pxm,
+            capsule(sx, sy, sw, sh),
+            if self.sounds {
+                GREEN
+            } else if self.hover == Hit::Sounds {
+                BTN_HOVER
+            } else {
+                BTN
+            },
+        );
         let knob_x = if self.sounds { sx + sw - sh / 2.0 } else { sx + sh / 2.0 };
         fill(pxm, circle(knob_x, sy + sh / 2.0, sh / 2.0 - p(3)), [250, 250, 250, 255]);
         card(pxm, l.hist, p(10));
@@ -658,6 +696,11 @@ impl Ui {
             for (i, r) in l.styles.iter().enumerate() {
                 let color = if Style::ALL[i] == self.style { T_INK } else { T_WHITE };
                 text(hdc, f[F_BODY], color, Style::ALL[i].label(), *r, L | DT_CENTER);
+            }
+            text(hdc, f[F_BODY], T_GREY, "Loading", l.loader_label, L);
+            for (i, r) in l.loaders.iter().enumerate() {
+                let color = if Loader::ALL[i] == self.loader { T_INK } else { T_WHITE };
+                text(hdc, f[F_BODY], color, Loader::ALL[i].label(), *r, L | DT_CENTER);
             }
             text(hdc, f[F_BODY], T_GREY, "Sounds", l.sounds_label, L | DT_RIGHT);
             text(hdc, f[F_TITLE], T_WHITE, "History", l.title, L);

@@ -34,6 +34,15 @@ Each one reacts to your voice, scales itself to how loud you talk, and settles t
 
 Red dot = recording, amber padlock = locked hands-free. Pick a style in the dashboard to preview it.
 
+The pill springs out of the dash when you start, squeezes down while it transcribes, and zooms
+back into the dash once the text is pasted. What it shows while transcribing is up to you
+("Loading" in the dashboard):
+
+| | |
+|:-:|:-:|
+| <img src="docs/loader-progress.gif" width="380" alt="Progress bar loader"><br>**Progress**: fills with the real progress (decoding is tracked step by step) | <img src="docs/loader-shimmer.gif" width="380" alt="Shimmer loader"><br>**Shimmer**: flowing colour with a sweeping sheen |
+| <img src="docs/loader-comet.gif" width="380" alt="Comet loader"><br>**Comet**: a glowing comet circling the pill | <img src="docs/loader-dots.gif" width="380" alt="Dots loader"><br>**Dots**: three dots riding a soft wave |
+
 ## Controls
 
 | Keys | What happens |

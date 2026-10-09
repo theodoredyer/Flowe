@@ -4,6 +4,8 @@
 
 #[path = "../draw.rs"]
 mod draw;
+#[path = "../loader.rs"]
+mod loader;
 #[path = "../pill.rs"]
 mod pill;
 #[path = "../viz.rs"]
@@ -12,7 +14,8 @@ mod viz;
 use std::fs::File;
 
 use gif::{DisposalMethod, Encoder, Frame, Repeat};
-use pill::{FPS, Idle, Pill, View};
+use loader::Loader;
+use pill::{FPS, Idle, Pill, View, demo_progress};
 use tiny_skia::{Color, GradientStop, LinearGradient, Pixmap, PixmapPaint, Point, Rect, SpreadMode, Transform};
 use viz::Style;
 
@@ -30,18 +33,15 @@ struct Scene {
 }
 
 impl Scene {
-    fn new(style: Style, (lw, lh): (f32, f32), taskbar: bool) -> Self {
-        let pill = Pill::new(S, style).expect("pill");
+    fn new(style: Style, loader: Loader, (lw, lh): (f32, f32), taskbar: bool) -> Self {
+        let pill = Pill::new(S, style, loader).expect("pill");
         let (w, h) = ((lw * S) as u32, (lh * S) as u32);
         let mut bg = Pixmap::new(w, h).expect("canvas");
         let paint = tiny_skia::Paint {
             shader: LinearGradient::new(
                 Point::from_xy(0.0, 0.0),
                 Point::from_xy(w as f32, h as f32),
-                vec![
-                    GradientStop::new(0.0, Color::from_rgba8(24, 22, 38, 255)),
-                    GradientStop::new(1.0, Color::from_rgba8(10, 12, 20, 255)),
-                ],
+                vec![GradientStop::new(0.0, Color::from_rgba8(24, 22, 38, 255)), GradientStop::new(1.0, Color::from_rgba8(10, 12, 20, 255))],
                 SpreadMode::Pad,
                 Transform::identity(),
             )
@@ -54,7 +54,8 @@ impl Scene {
             let tb = (14.0 * S) as i32;
             floor -= tb;
             let r = Rect::from_xywh(0.0, floor as f32, w as f32, tb as f32).unwrap();
-            let solid = |c: [u8; 4]| tiny_skia::Paint { shader: tiny_skia::Shader::SolidColor(Color::from_rgba8(c[0], c[1], c[2], c[3])), ..Default::default() };
+            let solid =
+                |c: [u8; 4]| tiny_skia::Paint { shader: tiny_skia::Shader::SolidColor(Color::from_rgba8(c[0], c[1], c[2], c[3])), ..Default::default() };
             bg.fill_rect(r, &solid([28, 28, 34, 255]), Transform::identity(), None);
             bg.fill_rect(Rect::from_xywh(0.0, floor as f32, w as f32, S).unwrap(), &solid([48, 48, 56, 255]), Transform::identity(), None);
             floor -= (6.0 * S) as i32; // the overlay's gap above the taskbar
@@ -65,9 +66,9 @@ impl Scene {
         Self { bg, at, pill }
     }
 
-    /// The scene with the pill showing `view`, cropped to the pill's rectangle (the rest never changes).
-    fn frame(&mut self, view: View, level: f32, tick: u32) -> Vec<u8> {
-        self.pill.paint(view, level, tick);
+    /// The next frame of the scene, cropped to the pill's rectangle (the rest never changes).
+    fn frame(&mut self, level: f32) -> Vec<u8> {
+        self.pill.paint(level);
         let mut canvas = self.bg.clone();
         canvas.draw_pixmap(self.at.0, self.at.1, self.pill.pixmap.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
         let (cw, (x0, y0)) = (canvas.width() as usize, self.at);
@@ -122,7 +123,8 @@ fn speech(t: f32, from: f32, to: f32) -> f32 {
 }
 
 /// Plays a timeline of (view, seconds) segments into a GIF. The visualization starts calm at
-/// the first Recording and keeps going through Locked, exactly like the app.
+/// the first Recording and keeps going through Locked, and the pill morphs between views,
+/// exactly like the app. Transcribing gets made-up progress that finishes on time.
 fn render(path: &str, mut scene: Scene, timeline: &[(View, f32)], talk: (f32, f32)) {
     let mut gif = Gif::create(path, &scene);
     let (mut t, mut step) = (0.0f32, 0u32);
@@ -130,10 +132,14 @@ fn render(path: &str, mut scene: Scene, timeline: &[(View, f32)], talk: (f32, f3
         if view == View::Recording {
             scene.pill.viz.reset();
         }
+        scene.pill.show(view);
         let steps = (secs * FPS) as u32;
         for tick in 0..steps {
+            if view == View::Transcribing {
+                scene.pill.progress = demo_progress(tick as f32 / FPS, secs * 0.85);
+            }
             // Advance the simulation every 60 Hz step; keep every second one as a frame.
-            let rgba = scene.frame(view, speech(t, talk.0, talk.1), tick);
+            let rgba = scene.frame(speech(t, talk.0, talk.1));
             if step % 2 == 0 {
                 gif.push(&scene, rgba);
             }
@@ -149,26 +155,24 @@ fn main() {
     // The whole flow: idle dash, hold Ctrl+Win, tap Space to lock, stop, transcribe, back to idle.
     render(
         "docs/flow.gif",
-        Scene::new(Style::Plasma, (260.0, 76.0), true),
-        &[
-            (View::Idle(Idle::Ready), 0.8),
-            (View::Recording, 2.2),
-            (View::Locked, 2.6),
-            (View::Transcribing, 1.0),
-            (View::Idle(Idle::Ready), 0.6),
-        ],
+        Scene::new(Style::Plasma, Loader::Progress, (260.0, 76.0), true),
+        &[(View::Idle(Idle::Ready), 0.8), (View::Recording, 2.2), (View::Locked, 2.6), (View::Transcribing, 1.6), (View::Idle(Idle::Ready), 0.9)],
         (1.05, 5.3),
     );
     // Each visualization: a few seconds of speech, then it settles.
     for style in [Style::Waves, Style::Liquid, Style::Lava] {
-        render(
-            &format!("docs/{}.gif", style.key()),
-            Scene::new(style, (196.0, 54.0), false),
-            &[(View::Recording, 4.5)],
-            (0.3, 3.4),
-        );
+        render(&format!("docs/{}.gif", style.key()), Scene::new(style, Loader::Progress, (196.0, 54.0), false), &[(View::Recording, 4.5)], (0.3, 3.4));
     }
     // Plasma picks new colours every recording, so show three.
     let rec = (View::Recording, 1.9);
-    render("docs/plasma.gif", Scene::new(Style::Plasma, (196.0, 54.0), false), &[rec, rec, rec], (0.2, 5.5));
+    render("docs/plasma.gif", Scene::new(Style::Plasma, Loader::Progress, (196.0, 54.0), false), &[rec, rec, rec], (0.2, 5.5));
+    // Each loader: the end of a recording, transcribing, and the zoom back into the dash.
+    for loader in Loader::ALL {
+        render(
+            &format!("docs/loader-{}.gif", loader.key()),
+            Scene::new(Style::Plasma, loader, (196.0, 54.0), false),
+            &[(View::Recording, 0.9), (View::Transcribing, 2.0), (View::Idle(Idle::Ready), 0.8)],
+            (0.0, 0.9),
+        );
+    }
 }

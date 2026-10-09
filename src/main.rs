@@ -7,6 +7,7 @@ mod draw;
 mod history;
 mod hotkey;
 mod icon;
+mod loader;
 mod overlay;
 mod pill;
 mod settings;
@@ -17,7 +18,7 @@ mod viz;
 mod win;
 
 use std::cell::RefCell;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::*;
@@ -39,7 +40,7 @@ const WM_ACTION: u32 = WM_APP + 1; // wparam: hotkey::Action
 const WM_ASR: u32 = WM_APP + 2; // "there's something on the results channel"
 const WM_TRAY: u32 = WM_APP + 3;
 const WM_AUTOSTOP: u32 = WM_APP + 4;
-const TIMER_ANIM: usize = 1;
+const TIMER_ANIM: usize = overlay::TIMER;
 const TIMER_FLASH: usize = 2;
 const WM_MOUSELEAVE: u32 = 0x02A3; // not re-exported by windows-sys where the other WM_ consts are
 const MIN_HOLD: Duration = Duration::from_millis(300);
@@ -75,6 +76,8 @@ struct App {
     history: History,
     jobs: mpsc::Sender<(Vec<f32>, u32)>,
     results: mpsc::Receiver<AsrMsg>,
+    /// The running transcription's progress, written by the ASR thread.
+    progress: Arc<asr::SharedProgress>,
     model: Model,
     recording: bool,
     paused: bool,
@@ -99,8 +102,8 @@ fn with_app(f: impl FnOnce(&mut App)) {
 }
 
 impl App {
-    fn animate(&self) {
-        unsafe { SetTimer(self.hwnd, TIMER_ANIM, 16, None) };
+    fn progress(&self) -> f32 {
+        self.progress.lock().ok().and_then(|p| p.as_ref().map(asr::Progress::fraction)).unwrap_or(0.0)
     }
 
     /// Push the current state to the tray icon, tooltip, idle dash and dashboard header.
@@ -141,7 +144,6 @@ impl App {
 
     fn flash(&mut self) {
         self.overlay.set(View::Flash);
-        self.animate();
     }
 
     fn on_action(&mut self, action: Action) {
@@ -163,7 +165,6 @@ impl App {
                 self.recording = true;
                 self.started = Instant::now();
                 self.overlay.set(View::Recording);
-                self.animate();
             }
             Action::Lock => {
                 win::log("locked hands-free");
@@ -238,18 +239,32 @@ impl App {
         self.settings.style = style;
         self.settings.save();
         self.overlay.set_style(style);
-        self.ui.set_prefs(style, self.settings.sounds);
-        if !self.recording {
+        self.ui.set_prefs(&self.settings);
+        if self.overlay_free() {
             self.overlay.demo(); // show what it looks like
-            self.animate();
         }
+    }
+
+    fn set_loader(&mut self, loader: loader::Loader) {
+        self.settings.loader = loader;
+        self.settings.save();
+        self.overlay.set_loader(loader);
+        self.ui.set_prefs(&self.settings);
+        if self.overlay_free() {
+            self.overlay.demo_loader();
+        }
+    }
+
+    /// Nothing real (recording or transcribing) is on the overlay, so a preview can take it.
+    fn overlay_free(&self) -> bool {
+        !self.recording && (matches!(self.overlay.view(), View::Hidden | View::Idle(_)) || self.progress.lock().is_ok_and(|p| p.is_none()))
     }
 
     fn toggle_sounds(&mut self) {
         self.settings.sounds = !self.settings.sounds;
         self.settings.save();
         sound::set_enabled(self.settings.sounds);
-        self.ui.set_prefs(self.settings.style, self.settings.sounds);
+        self.ui.set_prefs(&self.settings);
         if self.settings.sounds {
             sound::start(); // let them hear it
         }
@@ -323,7 +338,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_ASR => with_app(|app| app.on_asr()),
         WM_TIMER if wparam == TIMER_ANIM => with_app(|app| {
-            if !app.overlay.tick(app.recorder.level()) {
+            if !app.overlay.tick(app.recorder.level(), app.progress()) {
                 unsafe { KillTimer(hwnd, TIMER_ANIM) };
             }
         }),
@@ -362,6 +377,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 UiEvent::ClearHistory => with_app(|app| app.clear_history()),
                 UiEvent::CopyRow => with_app(|app| app.copy_selected()),
                 UiEvent::SetStyle(style) => with_app(|app| app.set_style(style)),
+                UiEvent::SetLoader(loader) => with_app(|app| app.set_loader(loader)),
                 UiEvent::ToggleSounds => with_app(|app| app.toggle_sounds()),
                 UiEvent::None => {}
             }
@@ -415,7 +431,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     0
 }
 
-fn asr_thread(hwnd: usize, jobs: mpsc::Receiver<(Vec<f32>, u32)>, results: mpsc::Sender<AsrMsg>) {
+fn asr_thread(hwnd: usize, jobs: mpsc::Receiver<(Vec<f32>, u32)>, results: mpsc::Sender<AsrMsg>, progress: Arc<asr::SharedProgress>) {
     let post = |msg: AsrMsg| {
         let _ = results.send(msg);
         unsafe { PostMessageW(hwnd as HWND, WM_ASR, 0, 0) };
@@ -436,7 +452,7 @@ fn asr_thread(hwnd: usize, jobs: mpsc::Receiver<(Vec<f32>, u32)>, results: mpsc:
             return;
         }
     };
-    let _ = model.transcribe(&vec![0.0; 16000]); // warm-up
+    let _ = model.transcribe(&vec![0.0; 16000], None); // warm-up
     win::log(&format!("model ready in {:.1}s", t.elapsed().as_secs_f32()));
     post(AsrMsg::Ready);
 
@@ -444,7 +460,7 @@ fn asr_thread(hwnd: usize, jobs: mpsc::Receiver<(Vec<f32>, u32)>, results: mpsc:
         let t = Instant::now();
         let audio = audio::resample(&audio, rate, 16000);
         let audio_ms = (audio.len() as u64 * 1000 / 16000) as u32;
-        match model.transcribe(&audio) {
+        match model.transcribe(&audio, Some(&progress)) {
             Ok(text) if !text.is_empty() => {
                 let latency_ms = t.elapsed().as_millis() as u32;
                 // The log only gets numbers; the text itself goes to history.tsv.
@@ -494,7 +510,7 @@ fn main() {
         let hwnd = ui.hwnd;
         let settings = Settings::load();
         sound::set_enabled(settings.sounds);
-        let Some(overlay) = Overlay::new(settings.style) else {
+        let Some(overlay) = Overlay::new(settings.style, settings.loader, hwnd) else {
             win::log("failed to create overlay");
             return;
         };
@@ -502,13 +518,15 @@ fn main() {
         let (jobs_tx, jobs_rx) = mpsc::channel();
         let (res_tx, res_rx) = mpsc::channel();
         let h = hwnd as usize;
-        if std::thread::Builder::new().name("asr".into()).spawn(move || asr_thread(h, jobs_rx, res_tx)).is_err() {
+        let progress = Arc::new(asr::SharedProgress::default());
+        let p = progress.clone();
+        if std::thread::Builder::new().name("asr".into()).spawn(move || asr_thread(h, jobs_rx, res_tx, p)).is_err() {
             win::log("failed to start asr thread");
             return;
         }
         let history = History::load();
         ui.rebuild(&history);
-        ui.set_prefs(settings.style, settings.sounds);
+        ui.set_prefs(&settings);
         APP.with(|a| {
             *a.borrow_mut() = Some(App {
                 hwnd,
@@ -519,6 +537,7 @@ fn main() {
                 history,
                 jobs: jobs_tx,
                 results: res_rx,
+                progress,
                 model: Model::Loading,
                 recording: false,
                 paused: false,
