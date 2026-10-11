@@ -52,6 +52,16 @@ const TIP_READY: &str = "Flowe - Ctrl+Win to talk, +Space to lock";
 /// Broadcast by a second instance so the running one shows its dashboard.
 const SHOW_MSG_NAME: &str = "flowe-show";
 
+/// The speech model takes ~0.5-1.5 GB of RAM while loaded, so it's dropped after this long unused
+/// and reloaded (~4 s) when the next recording starts, overlapping with the speaking.
+const MODEL_IDLE: Duration = Duration::from_secs(60);
+
+enum Job {
+    /// A recording started: load the model now if it was unloaded.
+    Warm,
+    Transcribe(Vec<f32>, u32),
+}
+
 enum AsrMsg {
     Ready,
     LoadFailed,
@@ -74,7 +84,7 @@ struct App {
     tray: Tray,
     ui: Ui,
     history: History,
-    jobs: mpsc::Sender<(Vec<f32>, u32)>,
+    jobs: mpsc::Sender<Job>,
     results: mpsc::Receiver<AsrMsg>,
     /// The running transcription's progress, written by the ASR thread.
     progress: Arc<asr::SharedProgress>,
@@ -162,6 +172,7 @@ impl App {
                     return;
                 }
                 sound::start();
+                let _ = self.jobs.send(Job::Warm);
                 self.recording = true;
                 self.started = Instant::now();
                 self.overlay.set(View::Recording);
@@ -194,7 +205,7 @@ impl App {
         if self.model == Model::Failed {
             // Nobody will ever consume the job; don't let recordings pile up in memory.
             self.flash();
-        } else if too_short || self.jobs.send((audio, rate)).is_err() {
+        } else if too_short || self.jobs.send(Job::Transcribe(audio, rate)).is_err() {
             self.overlay.back_to_idle();
         } else {
             self.overlay.set(View::Transcribing);
@@ -431,7 +442,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     0
 }
 
-fn asr_thread(hwnd: usize, jobs: mpsc::Receiver<(Vec<f32>, u32)>, results: mpsc::Sender<AsrMsg>, progress: Arc<asr::SharedProgress>) {
+fn asr_thread(hwnd: usize, jobs: mpsc::Receiver<Job>, results: mpsc::Sender<AsrMsg>, progress: Arc<asr::SharedProgress>) {
     let post = |msg: AsrMsg| {
         let _ = results.send(msg);
         unsafe { PostMessageW(hwnd as HWND, WM_ASR, 0, 0) };
@@ -443,20 +454,53 @@ fn asr_thread(hwnd: usize, jobs: mpsc::Receiver<(Vec<f32>, u32)>, results: mpsc:
         post(AsrMsg::LoadFailed);
         return;
     }
-    let t = Instant::now();
-    let mut model = match asr::Parakeet::load(&dir) {
-        Ok(m) => m,
-        Err(e) => {
-            win::log(&format!("model load failed: {e}"));
-            post(AsrMsg::LoadFailed);
-            return;
+    let load = || -> Option<asr::Parakeet> {
+        let t = Instant::now();
+        match asr::Parakeet::load(&dir) {
+            Ok(mut m) => {
+                let _ = m.transcribe(&vec![0.0; 16000], None); // warm-up
+                win::log(&format!("model ready in {:.1}s", t.elapsed().as_secs_f32()));
+                Some(m)
+            }
+            Err(e) => {
+                win::log(&format!("model load failed: {e}"));
+                None
+            }
         }
     };
-    let _ = model.transcribe(&vec![0.0; 16000], None); // warm-up
-    win::log(&format!("model ready in {:.1}s", t.elapsed().as_secs_f32()));
+    // Load once up front so a broken install shows at launch; after that the model only lives
+    // while it's being used (see MODEL_IDLE).
+    let mut model = load();
+    if model.is_none() {
+        post(AsrMsg::LoadFailed);
+        return;
+    }
     post(AsrMsg::Ready);
 
-    for (audio, rate) in jobs {
+    loop {
+        let job = match &model {
+            Some(_) => match jobs.recv_timeout(MODEL_IDLE) {
+                Ok(job) => job,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    model = None;
+                    win::log("model unloaded (idle)");
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            },
+            None => match jobs.recv() {
+                Ok(job) => job,
+                Err(_) => return,
+            },
+        };
+        if model.is_none() {
+            model = load();
+        }
+        let Job::Transcribe(audio, rate) = job else { continue };
+        let Some(model) = model.as_mut() else {
+            post(AsrMsg::Failed);
+            continue;
+        };
         let t = Instant::now();
         let audio = audio::resample(&audio, rate, 16000);
         let audio_ms = (audio.len() as u64 * 1000 / 16000) as u32;

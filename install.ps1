@@ -19,9 +19,12 @@ if ($Uninstall) {
 $src = Join-Path $PSScriptRoot "target\release"
 if (-not (Test-Path "$src\flowe.exe")) { throw "build first: cargo build --release" }
 New-Item -ItemType Directory -Force $dest | Out-Null
-Get-Process flowe -ErrorAction SilentlyContinue | Stop-Process
-Start-Sleep -Milliseconds 300
-Copy-Item "$src\flowe.exe", "$src\DirectML.dll" $dest -Force
+Get-Process flowe -ErrorAction SilentlyContinue | Stop-Process -PassThru | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
+# The exe can stay locked for a moment after the process exits (e.g. antivirus scanning it).
+for ($i = 0; ; $i++) {
+    try { Copy-Item "$src\flowe.exe", "$src\DirectML.dll" $dest -Force; break }
+    catch { if ($i -ge 20) { throw }; Start-Sleep -Milliseconds 250 }
+}
 
 function New-Link($path, $arguments) {
     $s = (New-Object -ComObject WScript.Shell).CreateShortcut($path)
