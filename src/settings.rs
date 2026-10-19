@@ -1,19 +1,22 @@
 //! User preferences in %LOCALAPPDATA%\Flowe\settings.txt (plain `key=value` lines).
 
 use crate::loader::Loader;
+use crate::sound::Pack;
 use crate::viz::Style;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Settings {
     pub style: Style,
     pub sounds: bool,
+    /// Which keyboard the start / stop / lock clicks come from.
+    pub sound: Pack,
     /// What the pill shows while transcribing.
     pub loader: Loader,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { style: Style::Waves, sounds: true, loader: Loader::Progress }
+        Self { style: Style::Waves, sounds: true, sound: Pack::Tactile, loader: Loader::Progress }
     }
 }
 
@@ -33,6 +36,7 @@ impl Settings {
             match line.split_once('=').map(|(k, v)| (k.trim(), v.trim())) {
                 Some(("style", v)) => s.style = Style::from_key(v).unwrap_or(s.style),
                 Some(("sounds", v)) => s.sounds = v != "off",
+                Some(("sound", v)) => s.sound = Pack::from_key(v).unwrap_or(s.sound),
                 Some(("loader", v)) => s.loader = Loader::from_key(v).unwrap_or(s.loader),
                 _ => {}
             }
@@ -41,7 +45,13 @@ impl Settings {
     }
 
     fn to_text(self) -> String {
-        format!("style={}\nsounds={}\nloader={}\n", self.style.key(), if self.sounds { "on" } else { "off" }, self.loader.key())
+        format!(
+            "style={}\nsounds={}\nsound={}\nloader={}\n",
+            self.style.key(),
+            if self.sounds { "on" } else { "off" },
+            self.sound.key(),
+            self.loader.key()
+        )
     }
 }
 
@@ -51,7 +61,7 @@ mod tests {
 
     #[test]
     fn roundtrip_and_defaults() {
-        let s = Settings { style: Style::Lava, sounds: false, loader: Loader::Comet };
+        let s = Settings { style: Style::Lava, sounds: false, sound: Pack::Crisp, loader: Loader::Comet };
         assert_eq!(Settings::parse(&s.to_text()), s);
         assert_eq!(Settings::parse(""), Settings::default());
         assert_eq!(Settings::parse("style=bogus\ngarbage\n"), Settings::default());

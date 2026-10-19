@@ -1,32 +1,134 @@
-//! Start / stop / lock sounds: soft "thocks" like a creamy, lubed mechanical keyboard switch.
-//! Synthesized once and played from memory (no asset files, no extra threads).
+//! Start / stop / lock sounds: soft keyboard clicks, picked in the dashboard from a few packs of
+//! real recordings (all CC0, see assets/sounds/CREDITS.md). Shaped once and played from memory.
 //!
-//! A thock is a short damped low tone (the body of the switch and keycap) plus a brief muffled
-//! noise burst (the bottom-out), all through a gentle low-pass so nothing is bright or sharp.
+//! Each clip is trimmed to its onset, high-passed (no thump) and gently low-passed (no tick),
+//! faded out, and normalized, so e    out.iter_mut().for_each(|v| *v *= gain(&out));ery pack sits at the same level and fits in the mic guards.
 
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_MEMORY, SND_NODEFAULT};
 
 const RATE: u32 = 44_100;
-const VOLUME: f32 = 0.42;
-
-/// One keystroke: (body pitch Hz, body decay s, noise brightness Hz, start offset ms).
-type Thock = (f32, f32, f32, u32);
-/// Start: a single mid thock. Stop: a deeper, slightly longer one. Lock: a quick double-tap.
-const START: &[Thock] = &[(240.0, 0.020, 1300.0, 0)];
-const STOP: &[Thock] = &[(165.0, 0.026, 1000.0, 0)];
-const LOCK: &[Thock] = &[(285.0, 0.016, 1500.0, 0), (285.0, 0.016, 1500.0, 70)];
+/// Every clip is scaled to this RMS over CLIP_MS (so short and long clicks sound about as loud),
+/// as long as its peak stays under MAX_PEAK.
+const LOUDNESS: f32 = 0.035;
+const MAX_PEAK: f32 = 0.7;
+/// Each keystroke is cut to this long, the last FADE_MS fading out.
+const CLIP_MS: u32 = 80;
+const FADE_MS: u32 = 30;
+const HIGH_PASS_HZ: f32 = 150.0;
+const LOW_PASS_HZ: f32 = 5000.0;
+/// Lock is two keystrokes this far apart.
+const LOCK_GAP_MS: u32 = 70;
+/// The dashboard preview plays start, then stop this much later.
+const PREVIEW_GAP_MS: u32 = 320;
 /// The recorder drops this much mic audio while our own sound plays so it isn't transcribed.
 const START_GUARD_MS: u32 = 90;
 const LOCK_GUARD_MS: u32 = 160;
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pack {
+    /// A lubed tactile switch: low and rounded.
+    Tactile,
+    /// A typical mechanical keyboard.
+    Mechanical,
+    /// Short, tight gaming-keyboard clicks.
+    Crisp,
+    /// A clean little UI click.
+    Click,
+}
+
+#[derive(Clone, Copy)]
+enum Role {
+    Start,
+    Stop,
+    Lock,
+}
+
+/// The raw cuts, [start, stop, lock] per pack (16-bit mono 44.1 kHz).
+const CLIPS: [[&[u8]; 3]; 4] = [
+    [
+        include_bytes!("../assets/sounds/tactile-start.wav"),
+        include_bytes!("../assets/sounds/tactile-stop.wav"),
+        include_bytes!("../assets/sounds/tactile-lock.wav"),
+    ],
+    [
+        include_bytes!("../assets/sounds/mechanical-start.wav"),
+        include_bytes!("../assets/sounds/mechanical-stop.wav"),
+        include_bytes!("../assets/sounds/mechanical-lock.wav"),
+    ],
+    [
+        include_bytes!("../assets/sounds/crisp-start.wav"),
+        include_bytes!("../assets/sounds/crisp-stop.wav"),
+        include_bytes!("../assets/sounds/crisp-lock.wav"),
+    ],
+    [
+        include_bytes!("../assets/sounds/click-start.wav"),
+        include_bytes!("../assets/sounds/click-stop.wav"),
+        include_bytes!("../assets/sounds/click-start.wav"), // a double tap of the start click
+    ],
+];
+
+impl Pack {
+    pub const ALL: [Pack; 4] = [Pack::Tactile, Pack::Mechanical, Pack::Crisp, Pack::Click];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Pack::Tactile => "Tactile",
+            Pack::Mechanical => "Mechanical",
+            Pack::Crisp => "Crisp",
+            Pack::Click => "Click",
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Pack::Tactile => "tactile",
+            Pack::Mechanical => "mechanical",
+            Pack::Crisp => "crisp",
+            Pack::Click => "click",
+        }
+    }
+
+    pub fn from_key(k: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.key() == k)
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    fn clip(self, role: Role) -> Vec<f32> {
+        shape(&decode(CLIPS[self.index()][role as usize]))
+    }
+
+    fn render(self, role: Role) -> Vec<f32> {
+        match role {
+            Role::Start | Role::Stop => self.clip(role),
+            Role::Lock => mix(&[(self.clip(Role::Lock), 0), (self.clip(Role::Lock), LOCK_GAP_MS)]),
+        }
+    }
+
+    fn preview(self) -> Vec<f32> {
+        mix(&[(self.clip(Role::Start), 0), (self.clip(Role::Stop), PREVIEW_GAP_MS)])
+    }
+}
+
 static USER_ON: AtomicBool = AtomicBool::new(true);
+static PACK: AtomicU8 = AtomicU8::new(0);
 
 /// The dashboard switch.
 pub fn set_enabled(on: bool) {
     USER_ON.store(on, Ordering::Relaxed);
+}
+
+pub fn set_pack(p: Pack) {
+    PACK.store(p.index() as u8, Ordering::Relaxed);
+}
+
+fn pack() -> Pack {
+    Pack::ALL[PACK.load(Ordering::Relaxed) as usize % Pack::ALL.len()]
 }
 
 /// Dev/test runs (fake mic, fake level, or FLOWE_NO_SOUND) are always silent.
@@ -41,21 +143,34 @@ pub fn start_guard_ms() -> u32 {
     if enabled() { START_GUARD_MS } else { 0 }
 }
 
+/// Rendered wavs, made on first use: [start, stop, lock, preview] per pack.
+static WAVS: [[OnceLock<Vec<u8>>; 4]; 4] = [const { [const { OnceLock::new() }; 4] }; 4];
+
+fn cached(p: Pack, slot: usize, make: impl FnOnce() -> Vec<f32>) -> &'static [u8] {
+    WAVS[p.index()][slot].get_or_init(|| wav(&make()))
+}
+
 pub fn start() {
-    static WAV: OnceLock<Vec<u8>> = OnceLock::new();
-    play("start", WAV.get_or_init(|| wav(&synth(START))));
+    let p = pack();
+    play("start", cached(p, 0, || p.render(Role::Start)));
 }
 
 pub fn stop() {
-    static WAV: OnceLock<Vec<u8>> = OnceLock::new();
-    play("stop", WAV.get_or_init(|| wav(&synth(STOP))));
+    let p = pack();
+    play("stop", cached(p, 1, || p.render(Role::Stop)));
 }
 
 /// Plays the lock sound; returns how much mic input to discard while it plays (0 when silent).
 pub fn lock() -> u32 {
-    static WAV: OnceLock<Vec<u8>> = OnceLock::new();
-    play("lock", WAV.get_or_init(|| wav(&synth(LOCK))));
+    let p = pack();
+    play("lock", cached(p, 2, || p.render(Role::Lock)));
     if enabled() { LOCK_GUARD_MS } else { 0 }
+}
+
+/// Start then stop, so a pack can be heard when it's picked.
+pub fn preview() {
+    let p = pack();
+    play("preview", cached(p, 3, || p.preview()));
 }
 
 fn play(name: &str, wav: &'static [u8]) {
@@ -69,46 +184,55 @@ fn play(name: &str, wav: &'static [u8]) {
     }
 }
 
-/// Mixes the keystrokes, low-passes the whole thing, and normalizes to VOLUME.
-fn synth(strokes: &[Thock]) -> Vec<f32> {
-    let len_ms = strokes.iter().map(|s| s.3 + 90).max().unwrap_or(90);
-    let mut out = vec![0.0f32; (RATE * len_ms / 1000) as usize];
-    let mut rng = 0x2468_ACE1u32;
-    for &(pitch, decay, bright, at) in strokes {
-        let start = (RATE * at / 1000) as usize;
-        let mut noise_lp = 0.0f32;
-        let a = 1.0 - (-std::f32::consts::TAU * bright / RATE as f32).exp(); // one-pole low-pass coefficient
-        for (i, o) in out[start..].iter_mut().enumerate() {
-            let t = i as f32 / RATE as f32;
-            let attack = (t / 0.0015).min(1.0); // 1.5 ms ramp: soft, no click
-            // Body: fundamental plus a quieter, faster-dying overtone (wood/plastic, not a bell).
-            let body = (std::f32::consts::TAU * pitch * t).sin() * (-t / decay).exp()
-                + 0.35 * (std::f32::consts::TAU * pitch * 2.03 * t).sin() * (-t / (decay * 0.5)).exp();
-            // Bottom-out: a few ms of noise, already darkened by its own low-pass.
-            rng ^= rng << 13;
-            rng ^= rng >> 17;
-            rng ^= rng << 5;
-            let white = (rng >> 8) as f32 / (1u32 << 23) as f32 - 1.0;
-            noise_lp += a * (white - noise_lp);
-            let thud = noise_lp * (-t / 0.006).exp();
-            *o += attack * (0.85 * body + 1.6 * thud);
+/// Samples of one of our own embedded wavs (16-bit mono PCM).
+fn decode(wav: &[u8]) -> Vec<f32> {
+    let data = wav.windows(4).position(|w| w == b"data").map_or(wav.len(), |i| i + 8);
+    wav[data.min(wav.len())..].chunks_exact(2).map(|s| i16::from_le_bytes([s[0], s[1]]) as f32 / 32768.0).collect()
+}
+
+/// Trims to the onset, filters, cuts to CLIP_MS with a fade, and normalizes to LOUDNESS.
+fn shape(raw: &[f32]) -> Vec<f32> {
+    let peak = raw.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1e-6);
+    let onset = raw.iter().position(|v| v.abs() > 0.1 * peak).unwrap_or(0).saturating_sub((RATE / 1000) as usize);
+    let len = ((RATE * CLIP_MS / 1000) as usize).min(raw.len() - onset);
+    let hp = 1.0 - (-std::f32::consts::TAU * HIGH_PASS_HZ / RATE as f32).exp(); // one-pole coefficients
+    let lp = 1.0 - (-std::f32::consts::TAU * LOW_PASS_HZ / RATE as f32).exp();
+    let (mut low, mut y) = (0.0f32, 0.0f32);
+    let mut out: Vec<f32> = raw[onset..onset + len]
+        .iter()
+        .map(|&x| {
+            low += hp * (x - low);
+            y += lp * ((x - low) - y);
+            y
+        })
+        .collect();
+    let fade_in = (RATE / 1000) as usize;
+    let fade_out = ((RATE * FADE_MS / 1000) as usize).min(len);
+    for (i, v) in out.iter_mut().enumerate() {
+        let tail = (len - i) as f32 / fade_out as f32;
+        let head = i as f32 / fade_in as f32;
+        // Raised-cosine out, so the end lands on silence without a click.
+        let out_gain = if tail < 1.0 { 0.5 - 0.5 * (std::f32::consts::PI * tail).cos() } else { 1.0 };
+        *v *= head.min(1.0) * out_gain;
+    }
+    let window = (RATE * CLIP_MS / 1000) as f32;
+    let rms = (out.iter().map(|v| v * v).sum::<f32>() / window).sqrt().max(1e-6);
+    let peak = out.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1e-6);
+    let gain = (LOUDNESS / rms).min(MAX_PEAK / peak);
+    out.iter_mut().for_each(|v| *v *= gain);
+    out
+}
+
+/// Lays clips over each other at the given offsets (ms).
+fn mix(parts: &[(Vec<f32>, u32)]) -> Vec<f32> {
+    let at = |ms: u32| (RATE * ms / 1000) as usize;
+    let len = parts.iter().map(|(c, ms)| at(*ms) + c.len()).max().unwrap_or(0);
+    let mut out = vec![0.0f32; len];
+    for (c, ms) in parts {
+        for (o, v) in out[at(*ms)..].iter_mut().zip(c) {
+            *o += v;
         }
     }
-    // Final gentle low-pass at ~2.2 kHz takes off any remaining edge.
-    let a = 1.0 - (-std::f32::consts::TAU * 2200.0 / RATE as f32).exp();
-    let mut y = 0.0f32;
-    for v in out.iter_mut() {
-        y += a * (*v - y);
-        *v = y;
-    }
-    // Fade the last 10 ms so the end is silent.
-    let fade = (RATE / 100) as usize;
-    let n = out.len();
-    for (i, v) in out[n - fade..].iter_mut().enumerate() {
-        *v *= 1.0 - i as f32 / fade as f32;
-    }
-    let max = out.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1e-6);
-    out.iter_mut().for_each(|v| *v *= VOLUME / max);
     out
 }
 
@@ -116,7 +240,7 @@ fn synth(strokes: &[Thock]) -> Vec<f32> {
 fn wav(samples: &[f32]) -> Vec<u8> {
     let pcm: Vec<i16> = samples
         .iter()
-        .map(|v| (v * i16::MAX as f32) as i16)
+        .map(|v| (v.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
         .chain(std::iter::repeat_n(0, (RATE / 100) as usize))
         .collect();
     let data_len = (pcm.len() * 2) as u32;
@@ -143,63 +267,86 @@ fn wav(samples: &[f32]) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    const ROLES: [Role; 3] = [Role::Start, Role::Stop, Role::Lock];
+
     fn energy(v: &[f32]) -> f32 {
         v.iter().map(|x| x * x).sum()
     }
 
+    /// Share of the energy above (or, `high == false`, below) `hz`, split with a one-pole filter.
+    fn band_share(s: &[f32], hz: f32, high: bool) -> f32 {
+        let a = 1.0 - (-std::f32::consts::TAU * hz / RATE as f32).exp();
+        let mut lp = 0.0;
+        let band: Vec<f32> = s
+            .iter()
+            .map(|&x| {
+                lp += a * (x - lp);
+                if high { x - lp } else { lp }
+            })
+            .collect();
+        energy(&band) / energy(s)
+    }
+
+    #[test]
+    fn keys_roundtrip() {
+        for p in Pack::ALL {
+            assert_eq!(Pack::from_key(p.key()), Some(p));
+        }
+        assert_eq!(Pack::from_key("thock"), None);
+    }
+
     #[test]
     fn sounds_are_valid_and_click_free() {
-        for spec in [START, STOP, LOCK] {
-            let s = synth(spec);
-            let peak = s.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-            assert!((peak - VOLUME).abs() < 1e-3, "peak {peak}");
-            assert!(s[0].abs() < 0.01 && s[s.len() - 1].abs() < 1e-4, "click at an edge");
-            let w = wav(&s);
-            assert_eq!(&w[0..4], b"RIFF");
-            assert_eq!(w.len(), 44 + u32::from_le_bytes(w[40..44].try_into().unwrap()) as usize);
+        for p in Pack::ALL {
+            for role in ROLES {
+                let s = p.render(role);
+                let peak = s.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+                assert!(peak > 0.1 && peak <= MAX_PEAK + 1e-4, "{p:?}: peak {peak}");
+                assert!(s[0].abs() < 0.02 && s[s.len() - 1].abs() < 1e-4, "{p:?}: click at an edge");
+                let w = wav(&s);
+                assert_eq!(&w[0..4], b"RIFF");
+                assert_eq!(w.len(), 44 + u32::from_le_bytes(w[40..44].try_into().unwrap()) as usize);
+            }
         }
     }
 
     #[test]
-    fn sounds_are_soft_not_sharp() {
-        // "Harshness" = energy in the high band. Split the signal with a ~2.5 kHz one-pole low-pass:
-        // what the low-pass removes is the high band. A creamy thock keeps it tiny.
-        for spec in [START, STOP, LOCK] {
-            let s = synth(spec);
-            let a = 1.0 - (-std::f32::consts::TAU * 2500.0 / RATE as f32).exp();
-            let mut lp = 0.0;
-            let high: Vec<f32> = s
-                .iter()
-                .map(|&x| {
-                    lp += a * (x - lp);
-                    x - lp
-                })
-                .collect();
-            let ratio = energy(&high) / energy(&s);
-            assert!(ratio < 0.03, "{:.1}% of the energy is above ~2.5 kHz", ratio * 100.0);
+    fn sounds_are_soft_not_thumpy_or_sharp() {
+        // No boom from the desk or the case, and no hiss or tick on top.
+        for p in Pack::ALL {
+            for role in ROLES {
+                let s = p.render(role);
+                let low = band_share(&s, 200.0, false);
+                let high = band_share(&s, 6000.0, true);
+                assert!(low < 0.06, "{p:?}: {:.1}% of the energy is below ~200 Hz", low * 100.0);
+                assert!(high < 0.1, "{p:?}: {:.1}% of the energy is above ~6 kHz", high * 100.0);
+            }
         }
     }
 
     #[test]
-    fn stop_is_deeper_than_start_and_lock_is_a_double_tap() {
-        let zc = |v: &[f32]| v.windows(2).filter(|w| (w[0] < 0.0) != (w[1] < 0.0)).count();
-        assert!(zc(&synth(STOP)) < zc(&synth(START)));
-        // Two distinct hits: energy dips between them and comes back.
-        let s = synth(LOCK);
-        let win = |ms: u32| energy(&s[(RATE * ms / 1000) as usize..(RATE * (ms + 10) / 1000) as usize]);
-        assert!(win(0) > 5.0 * win(55) && win(70) > 5.0 * win(55), "lock doesn't sound like two taps");
+    fn packs_are_about_equally_loud() {
+        // Energy over a fixed window, start sounds only (lock is two of them).
+        let loud = |p: Pack| p.render(Role::Start).iter().map(|v| v * v).sum::<f32>();
+        let (min, max) = Pack::ALL.iter().map(|&p| loud(p)).fold((f32::MAX, 0.0f32), |(a, b), e| (a.min(e), b.max(e)));
+        assert!(max / min < 1.6, "loudest pack has {:.1}x the energy of the quietest", max / min);
+    }
+
+    #[test]
+    fn lock_is_a_double_tap() {
+        for p in Pack::ALL {
+            let s = p.render(Role::Lock);
+            let win = |ms: u32| energy(&s[(RATE * ms / 1000) as usize..(RATE * (ms + 10) / 1000) as usize]);
+            assert!(win(0) > 3.0 * win(LOCK_GAP_MS - 15) && win(LOCK_GAP_MS) > 3.0 * win(LOCK_GAP_MS - 15), "{p:?}: lock doesn't sound like two taps");
+        }
     }
 
     #[test]
     fn sounds_fit_inside_their_mic_guards() {
-        let ms = |s: &[f32]| (s.len() as u32 + RATE / 100) * 1000 / RATE; // + wav tail
-        let audible = |s: &[f32]| {
-            // last sample still above 1% of peak
-            let last = s.iter().rposition(|v| v.abs() > 0.01 * VOLUME).unwrap_or(0) as u32;
-            last * 1000 / RATE
-        };
-        assert!(audible(&synth(START)) <= START_GUARD_MS, "start audible for {} ms", audible(&synth(START)));
-        assert!(audible(&synth(LOCK)) <= LOCK_GUARD_MS, "lock audible for {} ms", audible(&synth(LOCK)));
-        assert!(ms(&synth(START)) < 150);
+        let audible = |s: &[f32]| s.iter().rposition(|v| v.abs() > 0.003).unwrap_or(0) as u32 * 1000 / RATE;
+        for p in Pack::ALL {
+            assert!(audible(&p.render(Role::Start)) <= START_GUARD_MS, "{p:?}: start audible for {} ms", audible(&p.render(Role::Start)));
+            assert!(audible(&p.render(Role::Lock)) <= LOCK_GUARD_MS, "{p:?}: lock audible for {} ms", audible(&p.render(Role::Lock)));
+        }
     }
 }

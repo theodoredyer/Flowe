@@ -21,7 +21,8 @@ locally:
 - **Weightless when idle.** One ~22 MB Rust exe. The mic is closed and no timers run, so CPU sits at
   0.00% until you press the hotkey. Pausing unhooks even the keyboard.
 - **Out of the way.** A tiny dash above the taskbar says it's listening. It becomes a pill while you
-  talk, with soft keyboard-"thock" sounds on start, stop and lock.
+  talk, with soft keyboard clicks on start, stop and lock (four packs of real CC0 recordings to
+  pick from).
 
 ## Pick your visualization
 
@@ -56,7 +57,7 @@ Taps under 0.3 s are ignored, and a forgotten locked recording stops itself afte
 The transcript also stays on the clipboard.
 
 **Dashboard** (opens on launch, or click the tray badge): pause/resume, recording history
-(double-click a row to copy it again), word counts and usage stats, indicator style, sounds on/off.
+(double-click a row to copy it again), word counts and usage stats, indicator style, loader, sound pack and sounds on/off.
 
 ## Install
 
@@ -82,7 +83,8 @@ will react to Ctrl+Win.
 - `model\`: the ONNX model.
 - `history.tsv`: your recordings (time, audio length, transcription time, words, text). "Clear history" deletes it.
 - `flowe.log`: timings and errors only, never transcript text.
-- `settings.txt`: indicator style and sounds on/off.
+- `settings.txt`: indicator style, loader and sounds.
+- `pace.txt`: how long recent transcriptions took, so the progress bar can predict the next one.
 
 **Notes**
 

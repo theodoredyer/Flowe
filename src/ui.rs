@@ -16,6 +16,7 @@ use crate::draw::{capsule, circle, fill, rect, rounded_rect};
 use crate::history::{Entry, History, fmt_duration};
 use crate::loader::Loader;
 use crate::settings::Settings;
+use crate::sound::Pack;
 use crate::tray::Status;
 use crate::viz::Style;
 use crate::win::wide;
@@ -63,6 +64,7 @@ enum Hit {
     Thumb,
     Style(usize),
     Loader(usize),
+    Sound(usize),
     Sounds,
 }
 
@@ -73,6 +75,7 @@ pub enum UiEvent {
     CopyRow,
     SetStyle(Style),
     SetLoader(Loader),
+    SetSound(Pack),
     ToggleSounds,
 }
 
@@ -106,7 +109,8 @@ struct Layout {
     styles: [R; 4],
     loader_label: R,
     loaders: [R; 4],
-    sounds_label: R,
+    sound_label: R,
+    packs: [R; 4],
     sounds: R,
     hist: R,
     title: R,
@@ -147,6 +151,7 @@ pub struct Ui {
     clear_w: i32,
     style: Style,
     loader: Loader,
+    sound: Pack,
     sounds: bool,
 }
 
@@ -205,7 +210,7 @@ impl Ui {
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 px(s, 760),
-                px(s, 600),
+                px(s, 640),
                 core::ptr::null_mut(),
                 core::ptr::null_mut(),
                 hinst,
@@ -254,6 +259,7 @@ impl Ui {
                 clear_w: px(s, 100),
                 style: Style::Waves,
                 loader: Loader::Progress,
+                sound: Pack::Tactile,
                 sounds: true,
             })
         }
@@ -271,6 +277,7 @@ impl Ui {
     pub fn set_prefs(&mut self, s: &Settings) {
         self.style = s.style;
         self.loader = s.loader;
+        self.sound = s.sound;
         self.sounds = s.sounds;
         self.repaint();
     }
@@ -318,7 +325,7 @@ impl Ui {
     }
 
     pub fn min_size(&self) -> (i32, i32) {
-        (px(self.s, 640), px(self.s, 520))
+        (px(self.s, 640), px(self.s, 560))
     }
 
     pub fn show(&self) {
@@ -329,7 +336,7 @@ impl Ui {
     }
 
     pub fn hand_cursor(&self) -> bool {
-        matches!(self.hover, Hit::Pause | Hit::Clear | Hit::Row(_) | Hit::Style(_) | Hit::Loader(_) | Hit::Sounds)
+        matches!(self.hover, Hit::Pause | Hit::Clear | Hit::Row(_) | Hit::Style(_) | Hit::Loader(_) | Hit::Sound(_) | Hit::Sounds)
     }
 
     /// TIMER_UI: the "confirm clear?" state expires.
@@ -360,17 +367,20 @@ impl Ui {
         let cw = (w - 2 * m - 3 * gap) / 4;
         let cards = [0, 1, 2, 3].map(|i| R { x: m + i * (cw + gap), y: p(62), w: cw, h: p(78) });
         let today = R { x: m, y: p(152), w: w - 2 * m, h: p(18) };
-        // Preferences row: indicator style (segmented) on the left, sounds switch on the right.
+        // Preference rows, each a segmented control: indicator style, loader, sound pack (with the
+        // sounds on/off switch at the end of its row).
         let row_y = p(182);
         let prefs_label = R { x: m, y: row_y, w: p(70), h: p(30) };
         let (seg_w, seg_gap) = (p(86), p(6));
         let styles = [0, 1, 2, 3].map(|i| R { x: m + p(74) + i * (seg_w + seg_gap), y: row_y, w: seg_w, h: p(30) });
-        let sounds = R { x: w - m - p(40), y: row_y + p(5), w: p(40), h: p(20) };
-        let sounds_label = R { x: sounds.x - p(70), y: row_y, w: p(62), h: p(30) };
         let loader_y = row_y + p(38);
         let loader_label = R { y: loader_y, ..prefs_label };
         let loaders = styles.map(|r| R { y: loader_y, ..r });
-        let hist = R { x: m, y: p(264), w: w - 2 * m, h: (h - p(264) - m).max(p(120)) };
+        let sound_y = loader_y + p(38);
+        let sound_label = R { y: sound_y, ..prefs_label };
+        let packs = styles.map(|r| R { y: sound_y, ..r });
+        let sounds = R { x: w - m - p(40), y: sound_y + p(5), w: p(40), h: p(20) };
+        let hist = R { x: m, y: p(302), w: w - 2 * m, h: (h - p(302) - m).max(p(120)) };
         let title = R { x: hist.x + p(14), y: hist.y + p(10), w: p(70), h: p(22) };
         let clear = R { x: hist.x + hist.w - p(14) - self.clear_w, y: hist.y + p(10), w: self.clear_w, h: p(22) };
         let notice = R { x: title.x + title.w, y: title.y, w: (clear.x - title.x - title.w - p(12)).max(10), h: title.h };
@@ -396,7 +406,8 @@ impl Ui {
             styles,
             loader_label,
             loaders,
-            sounds_label,
+            sound_label,
+            packs,
             sounds,
             hist,
             title,
@@ -422,7 +433,9 @@ impl Ui {
             Hit::Style(i)
         } else if let Some(i) = l.loaders.iter().position(|r| r.contains(x, y)) {
             Hit::Loader(i)
-        } else if l.sounds.contains(x, y) || l.sounds_label.contains(x, y) {
+        } else if let Some(i) = l.packs.iter().position(|r| r.contains(x, y)) {
+            Hit::Sound(i)
+        } else if l.sounds.contains(x, y) {
             Hit::Sounds
         } else if l.thumb.is_some_and(|t| t.contains(x, y)) {
             Hit::Thumb
@@ -480,6 +493,7 @@ impl Ui {
                 Hit::Pause => return UiEvent::TogglePause,
                 Hit::Style(i) => return UiEvent::SetStyle(Style::ALL[i]),
                 Hit::Loader(i) => return UiEvent::SetLoader(Loader::ALL[i]),
+                Hit::Sound(i) => return UiEvent::SetSound(Pack::ALL[i]),
                 Hit::Sounds => return UiEvent::ToggleSounds,
                 Hit::Clear => {
                     if self.clear_armed {
@@ -620,6 +634,17 @@ impl Ui {
             };
             fill(pxm, capsule(x, y, w, h), color);
         }
+        for (i, r) in l.packs.iter().enumerate() {
+            let (x, y, w, h) = rf(*r);
+            // With sounds off the chosen pack is still marked, just not lit.
+            let color = match (Pack::ALL[i] == self.sound, self.sounds) {
+                (true, true) => SELECTED,
+                _ if self.hover == Hit::Sound(i) => BTN_HOVER,
+                (true, false) => BTN_HOVER,
+                _ => BTN,
+            };
+            fill(pxm, capsule(x, y, w, h), color);
+        }
         let (sx, sy, sw, sh) = rf(l.sounds);
         fill(
             pxm,
@@ -702,7 +727,15 @@ impl Ui {
                 let color = if Loader::ALL[i] == self.loader { T_INK } else { T_WHITE };
                 text(hdc, f[F_BODY], color, Loader::ALL[i].label(), *r, L | DT_CENTER);
             }
-            text(hdc, f[F_BODY], T_GREY, "Sounds", l.sounds_label, L | DT_RIGHT);
+            text(hdc, f[F_BODY], T_GREY, "Sounds", l.sound_label, L);
+            for (i, r) in l.packs.iter().enumerate() {
+                let color = match (Pack::ALL[i] == self.sound, self.sounds) {
+                    (true, true) => T_INK,
+                    (true, false) | (false, true) => T_WHITE,
+                    (false, false) => T_GREY,
+                };
+                text(hdc, f[F_BODY], color, Pack::ALL[i].label(), *r, L | DT_CENTER);
+            }
             text(hdc, f[F_TITLE], T_WHITE, "History", l.title, L);
             match &self.notice {
                 Some(n) => text(hdc, f[F_BODY], T_GREEN, n, l.notice, L),

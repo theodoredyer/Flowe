@@ -277,8 +277,18 @@ impl App {
         sound::set_enabled(self.settings.sounds);
         self.ui.set_prefs(&self.settings);
         if self.settings.sounds {
-            sound::start(); // let them hear it
+            sound::preview(); // let them hear it
         }
+    }
+
+    /// Picking a pack also turns sounds on, and plays it.
+    fn set_sound(&mut self, pack: sound::Pack) {
+        (self.settings.sound, self.settings.sounds) = (pack, true);
+        self.settings.save();
+        sound::set_pack(pack);
+        sound::set_enabled(true);
+        self.ui.set_prefs(&self.settings);
+        sound::preview();
     }
 
     fn clear_history(&mut self) {
@@ -389,6 +399,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 UiEvent::CopyRow => with_app(|app| app.copy_selected()),
                 UiEvent::SetStyle(style) => with_app(|app| app.set_style(style)),
                 UiEvent::SetLoader(loader) => with_app(|app| app.set_loader(loader)),
+                UiEvent::SetSound(p) => with_app(|app| app.set_sound(p)),
                 UiEvent::ToggleSounds => with_app(|app| app.toggle_sounds()),
                 UiEvent::None => {}
             }
@@ -468,6 +479,7 @@ fn asr_thread(hwnd: usize, jobs: mpsc::Receiver<Job>, results: mpsc::Sender<AsrM
             }
         }
     };
+    let mut pace = asr::Pace::load();
     // Load once up front so a broken install shows at launch; after that the model only lives
     // while it's being used (see MODEL_IDLE).
     let mut model = load();
@@ -504,11 +516,22 @@ fn asr_thread(hwnd: usize, jobs: mpsc::Receiver<Job>, results: mpsc::Sender<AsrM
         let t = Instant::now();
         let audio = audio::resample(&audio, rate, 16000);
         let audio_ms = (audio.len() as u64 * 1000 / 16000) as u32;
-        match model.transcribe(&audio, Some(&progress)) {
-            Ok(text) if !text.is_empty() => {
+        let secs = audio_ms as f32 / 1000.0;
+        let expect = pace.predict(secs);
+        let result = model.transcribe(&audio, Some((&progress, expect)));
+        if let Ok((_, took)) = &result {
+            pace.record(secs, *took);
+            pace.save();
+        }
+        let timing = |took: &asr::Timing| {
+            let ms = |s: f32| (s * 1000.0).round() as u32;
+            format!("encode {}+decode {}ms, expected {}+{}ms", ms(took.encode), ms(took.decode), ms(expect.encode), ms(expect.decode))
+        };
+        match result {
+            Ok((text, took)) if !text.is_empty() => {
                 let latency_ms = t.elapsed().as_millis() as u32;
                 // The log only gets numbers; the text itself goes to history.tsv.
-                win::log(&format!("{:.1}s audio -> {latency_ms}ms, {} chars", audio_ms as f32 / 1000.0, text.len()));
+                win::log(&format!("{secs:.1}s audio -> {latency_ms}ms ({}), {} chars", timing(&took), text.len()));
                 post(AsrMsg::Transcribed(Entry::new(text.clone(), audio_ms, latency_ms)));
                 // With a fake mic (dev testing) only the clipboard is set: never type into whatever is focused.
                 let fake_mic = std::env::var_os("FLOWE_FAKE_MIC").is_some();
@@ -517,8 +540,8 @@ fn asr_thread(hwnd: usize, jobs: mpsc::Receiver<Job>, results: mpsc::Sender<AsrM
                     win::send_paste();
                 }
             }
-            Ok(_) => {
-                win::log(&format!("{:.1}s audio -> empty", audio_ms as f32 / 1000.0));
+            Ok((_, took)) => {
+                win::log(&format!("{secs:.1}s audio -> empty ({})", timing(&took)));
                 post(AsrMsg::Empty);
             }
             Err(e) => {
@@ -554,6 +577,7 @@ fn main() {
         let hwnd = ui.hwnd;
         let settings = Settings::load();
         sound::set_enabled(settings.sounds);
+        sound::set_pack(settings.sound);
         let Some(overlay) = Overlay::new(settings.style, settings.loader, hwnd) else {
             win::log("failed to create overlay");
             return;

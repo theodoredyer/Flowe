@@ -164,25 +164,53 @@ pub fn resample(input: &[f32], from: u32, to: u32) -> Vec<f32> {
     }
     let ratio = to as f64 / from as f64;
     let cutoff = ratio.min(1.0) * 0.92; // fraction of the input Nyquist we keep
-    let half = (16.0 / cutoff).ceil() as isize;
+    let half = (16.0 / cutoff).ceil() as usize;
+    let taps = 2 * half + 1;
+    // Output i sits at input position i * step / phases. The fractional part only takes `phases`
+    // values, so each one's filter is computed once rather than per sample (sin/cos are the cost).
+    let g = gcd(from, to);
+    let (step, phases) = ((from / g) as usize, (to / g) as usize);
+    let kernel = |frac: f64| -> Vec<f32> {
+        (0..taps)
+            .map(|j| {
+                let d = frac + half as f64 - j as f64;
+                let t = cutoff * d;
+                let sinc = if t.abs() < 1e-9 { 1.0 } else { (std::f64::consts::PI * t).sin() / (std::f64::consts::PI * t) };
+                let w = 0.5 + 0.5 * (std::f64::consts::PI * d / (half as f64 + 1.0)).cos(); // Hann
+                (sinc * w) as f32
+            })
+            .collect()
+    };
+    let table: Vec<Vec<f32>> = if phases <= 4096 { (0..phases).map(|p| kernel(p as f64 / phases as f64)).collect() } else { Vec::new() };
     let out_len = (input.len() as f64 * ratio) as usize;
     let mut out = Vec::with_capacity(out_len);
     for i in 0..out_len {
-        let x = i as f64 / ratio;
-        let center = x.floor() as isize;
-        let (mut acc, mut norm) = (0.0f64, 0.0f64);
-        for k in (center - half).max(0)..=(center + half).min(input.len() as isize - 1) {
-            let d = x - k as f64;
-            let t = cutoff * d;
-            let sinc = if t.abs() < 1e-9 { 1.0 } else { (std::f64::consts::PI * t).sin() / (std::f64::consts::PI * t) };
-            let w = 0.5 + 0.5 * (std::f64::consts::PI * d / (half as f64 + 1.0)).cos(); // Hann
-            let c = sinc * w;
-            acc += input[k as usize] as f64 * c;
+        let pos = i * step;
+        let (center, phase) = (pos / phases, pos % phases);
+        let odd;
+        let k = match table.get(phase) {
+            Some(k) => k,
+            None => {
+                odd = kernel(phase as f64 / phases as f64);
+                &odd
+            }
+        };
+        // Taps falling off either end of the input are dropped and the rest renormalized.
+        let first = half.saturating_sub(center);
+        let last = (input.len() + half - center).min(taps);
+        let start = center + first - half;
+        let (mut acc, mut norm) = (0.0f32, 0.0f32);
+        for (c, x) in k[first..last].iter().zip(&input[start..]) {
+            acc += x * c;
             norm += c;
         }
-        out.push(if norm.abs() > 1e-9 { (acc / norm) as f32 } else { 0.0 });
+        out.push(if norm.abs() > 1e-9 { acc / norm } else { 0.0 });
     }
     out
+}
+
+fn gcd(a: u32, b: u32) -> u32 {
+    if b == 0 { a } else { gcd(b, a % b) }
 }
 
 #[cfg(test)]
@@ -199,5 +227,21 @@ mod tests {
         assert_eq!(low.len(), 16000);
         assert!((rms(&low) - 0.707).abs() < 0.02, "{}", rms(&low));
         assert!(rms(&high) < 0.02, "{}", rms(&high));
+        // 44.1k has 160 filter phases instead of 1.
+        let tone = |f: f64| (0..44100).map(|i| (2.0 * std::f64::consts::PI * f * i as f64 / 44100.0).sin() as f32).collect::<Vec<_>>();
+        let low = resample(&tone(440.0), 44100, 16000);
+        assert_eq!(low.len(), 16000);
+        assert!((rms(&low) - 0.707).abs() < 0.02, "{}", rms(&low));
+        assert!(rms(&resample(&tone(12000.0), 44100, 16000)) < 0.02);
+    }
+
+    #[test]
+    fn resample_edges_stay_level() {
+        // Taps past either end are dropped and the rest renormalized, so a constant stays constant.
+        for from in [48000, 44100, 22050] {
+            let out = resample(&vec![0.5; from as usize / 10], from, 16000);
+            assert!(out.iter().all(|v| (v - 0.5).abs() < 1e-3), "{from}: {:?} .. {:?}", &out[..3], &out[out.len() - 3..]);
+        }
     }
 }
+

@@ -30,9 +30,13 @@ pub struct Parakeet {
     dec: Session,
     vocab: Vec<String>,
     blank: usize,
-    /// Seconds each stage took per second of audio, learned from recent runs (for `Progress`).
-    enc_rate: f32,
-    dec_rate: f32,
+}
+
+/// How long the two halves of a transcription took, in seconds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Timing {
+    pub encode: f32,
+    pub decode: f32,
 }
 
 fn cpu_builder() -> Result<SessionBuilder, Error> {
@@ -60,32 +64,27 @@ impl Parakeet {
             .with_memory_pattern(false)?
             .commit_from_file(dir.join("encoder-model.onnx"))?;
         let dec = cpu_builder()?.commit_from_file(dir.join("decoder_joint-model.onnx"))?;
-        Ok(Self { pre, enc, dec, vocab, blank, enc_rate: 0.012, dec_rate: 0.02 })
+        Ok(Self { pre, enc, dec, vocab, blank })
     }
 
     /// `audio`: mono 16 kHz samples in [-1, 1]. `progress`, if given, is kept up to date while
-    /// this runs and cleared when it's done.
-    pub fn transcribe(&mut self, audio: &[f32], progress: Option<&SharedProgress>) -> Result<String, Error> {
+    /// this runs (paced by `expect`, see `Pace`) and cleared when it's done.
+    pub fn transcribe(&mut self, audio: &[f32], progress: Option<(&SharedProgress, Timing)>) -> Result<(String, Timing), Error> {
         let report = |f: &dyn Fn(&mut Option<Progress>)| {
-            if let Some(Ok(mut p)) = progress.map(Mutex::lock) {
+            if let Some(Ok(mut p)) = progress.map(|(p, _)| p.lock()) {
                 f(&mut p);
             }
         };
-        let secs = audio.len() as f32 / 16000.0;
         let started = Instant::now();
-        let (enc_s, dec_s) = (self.enc_rate * secs + 0.03, self.dec_rate * secs + 0.01);
-        report(&|p| *p = Some(Progress { start: started, encode_s: enc_s, encode_share: enc_s / (enc_s + dec_s), decoded: None }));
+        if let Some((_, expect)) = progress {
+            let (enc, dec) = (expect.encode.max(0.01), expect.decode.max(0.01));
+            report(&|p| *p = Some(Progress { start: started, encode_s: enc, encode_share: enc / (enc + dec), decoded: None }));
+        }
         let result = self.run(audio, &report);
         report(&|p| *p = None);
-        if secs >= 2.0
-            && let Ok((_, decode_start)) = &result
-        {
-            // Learn this machine's speed; the bar's pacing gets better with use.
-            let (enc, dec) = ((*decode_start - started).as_secs_f32(), decode_start.elapsed().as_secs_f32());
-            self.enc_rate = 0.5 * self.enc_rate + 0.5 * enc / secs;
-            self.dec_rate = 0.5 * self.dec_rate + 0.5 * dec / secs;
-        }
-        result.map(|(text, _)| text)
+        let (text, decode_start) = result?;
+        let timing = Timing { encode: (decode_start - started).as_secs_f32(), decode: decode_start.elapsed().as_secs_f32() };
+        Ok((text, timing))
     }
 
     /// The pipeline; returns the text and when decoding started.
@@ -193,6 +192,115 @@ impl Progress {
     }
 }
 
+/// Predicts how long each stage will take for a clip, for the progress bar. Each stage is fitted
+/// as `time = overhead + rate * seconds of audio` to this machine's recent transcriptions (newest
+/// weighted most), starting from typical numbers. Kept in pace.txt so it survives the model
+/// being unloaded and the app restarting.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Pace {
+    /// (seconds of audio, timing), oldest first.
+    runs: Vec<(f32, Timing)>,
+}
+
+const PACE_RUNS: usize = 40;
+/// Each older run counts this much less than the one after it.
+const PACE_DECAY: f32 = 0.85;
+/// A run this many times longer or shorter than the clip being predicted counts 40% less.
+const PACE_SPREAD: f32 = 3.0;
+/// A typical machine per stage, (overhead s, s per s of audio), measured on a mid-range GPU; its
+/// shape is assumed (scaled to this machine) until there are runs near a length, worth this many.
+const PRIOR_ENCODE: (f32, f32) = (0.2, 0.0055);
+const PRIOR_DECODE: (f32, f32) = (0.005, 0.0067);
+const PRIOR_WEIGHT: f32 = 1.0;
+
+impl Pace {
+    fn path() -> std::path::PathBuf {
+        crate::win::data_dir().join("pace.txt")
+    }
+
+    pub fn load() -> Self {
+        Self::parse(&std::fs::read_to_string(Self::path()).unwrap_or_default())
+    }
+
+    pub fn save(&self) {
+        let _ = std::fs::write(Self::path(), self.to_text());
+    }
+
+    fn parse(text: &str) -> Self {
+        let runs = text
+            .lines()
+            .filter_map(|l| {
+                let v: Vec<f32> = l.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+                (v.len() == 3 && v.iter().all(|x| x.is_finite() && *x >= 0.0)).then(|| (v[0], Timing { encode: v[1], decode: v[2] }))
+            })
+            .collect::<Vec<_>>();
+        let skip = runs.len().saturating_sub(PACE_RUNS);
+        Self { runs: runs[skip..].to_vec() }
+    }
+
+    fn to_text(&self) -> String {
+        self.runs.iter().map(|(s, t)| format!("{s:.2} {:.4} {:.4}\n", t.encode, t.decode)).collect()
+    }
+
+    pub fn record(&mut self, secs: f32, t: Timing) {
+        if secs < 0.5 || !(t.encode.is_finite() && t.decode.is_finite()) {
+            return;
+        }
+        self.runs.push((secs, t));
+        if self.runs.len() > PACE_RUNS {
+            self.runs.remove(0);
+        }
+    }
+
+    pub fn predict(&self, secs: f32) -> Timing {
+        let n = self.runs.len();
+        let fit = |stage: fn(&Timing) -> f32, prior: (f32, f32)| {
+            let recency = |i: usize| PACE_DECAY.powi((n - 1 - i) as i32);
+            // The typical curve, scaled by how much faster or slower this machine has been lately.
+            let scale = {
+                let (mut got, mut want) = (0.0, 0.0);
+                for (i, (x, t)) in self.runs.iter().enumerate() {
+                    got += recency(i) * stage(t);
+                    want += recency(i) * (prior.0 + prior.1 * x);
+                }
+                if want > 0.0 { (got / want).clamp(0.1, 10.0) } else { 1.0 }
+            };
+            let typical = |x: f32| scale * (prior.0 + prior.1 * x);
+            // Then a line fitted near this length (runs much shorter or longer count less, since
+            // the encoder isn't quite linear), on relative error so short clips matter as much as
+            // long ones. The typical curve enters as one run either side, so a couple of odd runs
+            // can't swing it wildly.
+            let near = |x: f32| (-(x / secs).ln().powi(2) / (2.0 * PACE_SPREAD.ln().powi(2))).exp();
+            let mut pts: Vec<(f32, f32, f32)> = [secs / 2.0, secs * 2.0].iter().map(|&x| (x, typical(x), PRIOR_WEIGHT / 2.0)).collect();
+            pts.extend(self.runs.iter().enumerate().map(|(i, (x, t))| (*x, stage(t), recency(i) * near(*x))));
+            pts.iter_mut().for_each(|p| p.2 /= typical(p.0).max(1e-3).powi(2));
+            let (a, b) = weighted_line(&pts);
+            (a + b * secs).max(0.0)
+        };
+        Timing { encode: fit(|t| t.encode, PRIOR_ENCODE), decode: fit(|t| t.decode, PRIOR_DECODE) }
+    }
+}
+
+/// Least-squares `y = a + b x` over (x, y, weight), with neither term allowed below zero.
+fn weighted_line(pts: &[(f32, f32, f32)]) -> (f32, f32) {
+    let sw: f32 = pts.iter().map(|p| p.2).sum();
+    let mx = pts.iter().map(|p| p.2 * p.0).sum::<f32>() / sw;
+    let my = pts.iter().map(|p| p.2 * p.1).sum::<f32>() / sw;
+    let sxx: f32 = pts.iter().map(|p| p.2 * (p.0 - mx).powi(2)).sum();
+    let sxy: f32 = pts.iter().map(|p| p.2 * (p.0 - mx) * (p.1 - my)).sum();
+    let b = if sxx > 1e-6 { sxy / sxx } else { 0.0 };
+    if b < 0.0 {
+        return (my.max(0.0), 0.0);
+    }
+    let a = my - b * mx;
+    if a < 0.0 {
+        // Through the origin instead.
+        let b = pts.iter().map(|p| p.2 * p.0 * p.1).sum::<f32>() / pts.iter().map(|p| p.2 * p.0 * p.0).sum::<f32>().max(1e-6);
+        return (0.0, b.max(0.0));
+    }
+    (a, b)
+}
+
 fn argmax(v: &[f32]) -> usize {
     v.iter().enumerate().fold((0, f32::NEG_INFINITY), |b, (i, &x)| if x > b.1 { (i, x) } else { b }).0
 }
@@ -221,6 +329,54 @@ mod tests {
     fn spaces() {
         assert_eq!(fix_spaces(" Hello , world . It's"), "Hello, world. It's");
     }
+
+    fn total(t: Timing) -> f32 {
+        t.encode + t.decode
+    }
+
+    #[test]
+    fn pace_learns_a_slow_machine() {
+        // Three times slower than the prior, plus a fixed 0.4 s of encoder overhead.
+        let machine = |x: f32| Timing { encode: 0.4 + 0.015 * x, decode: 0.02 * x };
+        let mut pace = Pace::default();
+        let before = total(pace.predict(30.0)) / total(machine(30.0));
+        for x in [3.0, 8.0, 20.0, 5.0, 45.0, 12.0, 90.0, 2.0] {
+            pace.record(x, machine(x));
+        }
+        for x in [1.5, 4.0, 15.0, 60.0, 150.0] {
+            let ratio = total(pace.predict(x)) / total(machine(x));
+            assert!((ratio - 1.0).abs() < 0.15, "{x}s: predicted {ratio:.2}x the real time (untrained: {before:.2}x)");
+        }
+    }
+
+    #[test]
+    fn pace_follows_a_change_and_ignores_junk() {
+        let mut pace = Pace::default();
+        for _ in 0..20 {
+            pace.record(10.0, Timing { encode: 1.0, decode: 1.0 });
+        }
+        // The machine got faster (say the GPU was busy before): recent runs win.
+        for _ in 0..8 {
+            pace.record(10.0, Timing { encode: 0.2, decode: 0.1 });
+        }
+        assert!(total(pace.predict(10.0)) < 1.0, "{:?}", pace.predict(10.0));
+        pace.record(0.1, Timing { encode: 50.0, decode: 50.0 }); // too short to learn from
+        pace.record(10.0, Timing { encode: f32::NAN, decode: 0.1 });
+        assert!(total(pace.predict(10.0)) < 1.0);
+    }
+
+    #[test]
+    fn pace_roundtrips_and_caps() {
+        let mut pace = Pace::default();
+        for i in 0..(PACE_RUNS + 5) {
+            pace.record(1.0 + i as f32, Timing { encode: 0.25, decode: 0.0125 });
+        }
+        assert_eq!(pace.runs.len(), PACE_RUNS);
+        assert_eq!(Pace::parse(&pace.to_text()), pace);
+        assert_eq!(Pace::parse("garbage\n1 2\n-1 0.2 0.1\n"), Pace::default());
+        let p = Pace::default().predict(0.0);
+        assert!(p.encode > 0.0 && p.decode >= 0.0);
+    }
 }
 
 /// End-to-end check against a real model + 16-bit PCM wav:
@@ -236,8 +392,36 @@ mod e2e {
         let mut m = super::Parakeet::load(&crate::win::data_dir().join("model")).unwrap();
         m.transcribe(&audio[..16000], None).unwrap(); // warm-up
         let t = std::time::Instant::now();
-        let text = m.transcribe(&audio, None).unwrap();
+        let (text, _) = m.transcribe(&audio, None).unwrap();
         println!("{rate} Hz, {:.1}s audio -> {:.3}s: {text:?}", pcm.len() as f32 / rate as f32, t.elapsed().as_secs_f32());
         assert!(text.to_lowercase().contains("local dictation"));
+    }
+
+    /// How long each stage takes for clips of different lengths, and how well `Pace` predicts it
+    /// after learning from the earlier clips: `FLOWE_WAV=long.wav cargo test --release pace_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn pace_bench() {
+        let path = std::env::var("FLOWE_WAV").expect("set FLOWE_WAV");
+        let (pcm, rate) = crate::audio::read_wav_pcm16(std::path::Path::new(&path)).unwrap();
+        let audio = crate::audio::resample(&pcm, rate, 16000);
+        let mut m = super::Parakeet::load(&crate::win::data_dir().join("model")).unwrap();
+        m.transcribe(&audio[..16000], None).unwrap(); // warm-up
+        let mut pace = super::Pace::default();
+        for secs in [2, 4, 7, 12, 20, 35, 60, 90, 150, 240, 400, 3, 10, 30, 120] {
+            let n = (secs * 16000).min(audio.len());
+            let guess = pace.predict(n as f32 / 16000.0);
+            let (_, t) = m.transcribe(&audio[..n], None).unwrap();
+            println!(
+                "{:>5.1}s audio: encode {:>5.0}ms decode {:>5.0}ms | predicted {:>5.0} {:>5.0} ({:+.0}% total)",
+                n as f32 / 16000.0,
+                t.encode * 1e3,
+                t.decode * 1e3,
+                guess.encode * 1e3,
+                guess.decode * 1e3,
+                ((guess.encode + guess.decode) / (t.encode + t.decode) - 1.0) * 100.0
+            );
+            pace.record(n as f32 / 16000.0, t);
+        }
     }
 }

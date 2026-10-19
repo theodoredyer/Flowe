@@ -278,7 +278,9 @@ impl Pill {
         self.age = (self.age + dt).min(f32::MAX);
         self.clock += dt;
         if self.view == View::Transcribing || self.prev == View::Transcribing {
-            self.shown += ((self.progress - self.shown) * 0.12).max(0.0); // eased, never backwards
+            // Eased (the bar never jumps or runs backwards), but quick: `progress` is already
+            // smooth, so heavy easing would only make the bar lag behind it.
+            self.shown += ((self.progress - self.shown) * 0.3).max(0.0);
         }
         // New content fades in over the first 0.2 s of a morph while the old fades out; zooming
         // into the dash, the old content stays until the pill is actually shrinking.
