@@ -42,6 +42,12 @@ const WM_TRAY: u32 = WM_APP + 3;
 const WM_AUTOSTOP: u32 = WM_APP + 4;
 const TIMER_ANIM: usize = overlay::TIMER;
 const TIMER_FLASH: usize = 2;
+// 3 is ui::TIMER_UI.
+const TIMER_WARM: usize = 4;
+/// How long into a recording the model starts loading. Shorter clips (taps, desktop switches,
+/// a word or two) never pay for a load; longer ones load it while you're still talking.
+const WARM_AFTER_MS: u32 = 1000;
+const KEEP_WARM_MS: u32 = 30_000;
 const WM_MOUSELEAVE: u32 = 0x02A3; // not re-exported by windows-sys where the other WM_ consts are
 const MIN_HOLD: Duration = Duration::from_millis(300);
 const ID_QUIT: usize = 1;
@@ -52,8 +58,8 @@ const TIP_READY: &str = "Flowe - Ctrl+Win to talk, +Space to lock";
 /// Broadcast by a second instance so the running one shows its dashboard.
 const SHOW_MSG_NAME: &str = "flowe-show";
 
-/// The speech model takes ~0.5-1.5 GB of RAM while loaded, so it's dropped after this long unused
-/// and reloaded (~4 s) when the next recording starts, overlapping with the speaking.
+/// The speech model takes ~2.8 GB of RAM while loaded, so it's dropped after this long unused
+/// and reloaded (~2.5 s) a second into the next recording, while you're still talking.
 const MODEL_IDLE: Duration = Duration::from_secs(60);
 
 enum Job {
@@ -172,7 +178,9 @@ impl App {
                     return;
                 }
                 sound::start();
-                let _ = self.jobs.send(Job::Warm);
+                // Load the model once this is clearly a real recording, not a stray tap or a
+                // Ctrl+Win+arrow desktop switch (see TIMER_WARM).
+                unsafe { SetTimer(self.hwnd, TIMER_WARM, WARM_AFTER_MS, None) };
                 self.recording = true;
                 self.started = Instant::now();
                 self.overlay.set(View::Recording);
@@ -185,6 +193,7 @@ impl App {
             }
             Action::Stop => self.stop(),
             Action::Cancel => {
+                unsafe { KillTimer(self.hwnd, TIMER_WARM) };
                 self.recording = false;
                 drop(self.recorder.stop());
                 self.overlay.back_to_idle();
@@ -197,6 +206,8 @@ impl App {
         if !self.recording {
             return;
         }
+        // A Transcribe job loads the model itself if it isn't already.
+        unsafe { KillTimer(self.hwnd, TIMER_WARM) };
         self.recording = false;
         let (audio, rate) = self.recorder.stop();
         sound::stop();
@@ -371,6 +382,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             with_app(|app| app.ui.set_notice(None));
         }
         WM_TIMER if wparam == ui::TIMER_UI => with_app(|app| app.ui.tick()),
+        WM_TIMER if wparam == TIMER_WARM => with_app(|app| {
+            if app.recording {
+                let _ = app.jobs.send(Job::Warm);
+                // Keep it warm through a long recording: the idle unload counts from the last job.
+                unsafe { SetTimer(hwnd, TIMER_WARM, KEEP_WARM_MS, None) };
+            } else {
+                unsafe { KillTimer(hwnd, TIMER_WARM) };
+            }
+        }),
         WM_TRAY => match (lparam & 0xFFFF) as u32 {
             WM_LBUTTONUP => run_command(hwnd, ID_OPEN),
             WM_RBUTTONUP => {
@@ -483,13 +503,11 @@ fn asr_thread(hwnd: usize, jobs: mpsc::Receiver<Job>, results: mpsc::Sender<AsrM
         }
     };
     let mut pace = asr::Pace::load();
-    // Load once up front so a broken install shows at launch; after that the model only lives
-    // while it's being used (see MODEL_IDLE).
-    let mut model = load();
-    if model.is_none() {
-        post(AsrMsg::LoadFailed);
-        return;
-    }
+    // Nothing is loaded at launch: that's ~2.5 s of a busy core and ~2.8 GB of RAM while the
+    // dashboard opens, for a model that would unload after a minute anyway. It loads once you've
+    // been talking a moment (Job::Warm) and only lives while it's being used (see MODEL_IDLE).
+    let mut model: Option<asr::Parakeet> = None;
+    let mut failed = false;
     post(AsrMsg::Ready);
 
     loop {
@@ -508,8 +526,12 @@ fn asr_thread(hwnd: usize, jobs: mpsc::Receiver<Job>, results: mpsc::Sender<AsrM
                 Err(_) => return,
             },
         };
-        if model.is_none() {
+        if model.is_none() && !failed {
             model = load();
+            if model.is_none() {
+                failed = true; // a broken install won't fix itself; don't retry every recording
+                post(AsrMsg::LoadFailed);
+            }
         }
         let Job::Transcribe(audio, rate) = job else { continue };
         let Some(model) = model.as_mut() else {

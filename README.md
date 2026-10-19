@@ -88,7 +88,9 @@ will react to Ctrl+Win.
 
 **Notes**
 
-- About 400 MB of RAM while idle: that is the model staying loaded so transcription is instant.
+- About 60 MB of RAM while idle. The speech model (~2.8 GB) loads a second into a recording, while
+  you talk, and unloads after a minute unused. A recording under ~3 s right after a quiet spell
+  can wait a couple of seconds for it.
 - Apps running as Administrator only receive the paste if Flowe runs elevated too.
 
 **Dev commands**
