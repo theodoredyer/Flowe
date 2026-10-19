@@ -159,8 +159,8 @@ pub fn read_wav_pcm16(path: &std::path::Path) -> Option<(Vec<f32>, u32)> {
 
 /// Windowed-sinc resampler (band-limited, so 48k -> 16k doesn't alias).
 pub fn resample(input: &[f32], from: u32, to: u32) -> Vec<f32> {
-    if from == to || input.is_empty() {
-        return input.to_vec();
+    if from == to || input.is_empty() || from == 0 || to == 0 {
+        return input.to_vec(); // 0 Hz only comes from a broken wav; don't size a buffer from it
     }
     let ratio = to as f64 / from as f64;
     let cutoff = ratio.min(1.0) * 0.92; // fraction of the input Nyquist we keep
@@ -237,6 +237,7 @@ mod tests {
 
     #[test]
     fn resample_edges_stay_level() {
+        assert_eq!(resample(&[0.1, 0.2], 0, 16000), vec![0.1, 0.2]); // a broken wav header
         // Taps past either end are dropped and the rest renormalized, so a constant stays constant.
         for from in [48000, 44100, 22050] {
             let out = resample(&vec![0.5; from as usize / 10], from, 16000);

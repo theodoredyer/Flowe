@@ -276,8 +276,9 @@ impl App {
         self.settings.save();
         sound::set_enabled(self.settings.sounds);
         self.ui.set_prefs(&self.settings);
-        if self.settings.sounds {
-            sound::preview(); // let them hear it
+        // Let them hear it, unless the mic is open (there's no guard for a preview).
+        if self.settings.sounds && !self.recording {
+            sound::preview();
         }
     }
 
@@ -288,7 +289,9 @@ impl App {
         sound::set_pack(pack);
         sound::set_enabled(true);
         self.ui.set_prefs(&self.settings);
-        sound::preview();
+        if !self.recording {
+            sound::preview();
+        }
     }
 
     fn clear_history(&mut self) {

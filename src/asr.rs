@@ -231,7 +231,8 @@ impl Pace {
             .lines()
             .filter_map(|l| {
                 let v: Vec<f32> = l.split_whitespace().filter_map(|x| x.parse().ok()).collect();
-                (v.len() == 3 && v.iter().all(|x| x.is_finite() && *x >= 0.0)).then(|| (v[0], Timing { encode: v[1], decode: v[2] }))
+                let run = (v.len() == 3).then(|| (v[0], Timing { encode: v[1], decode: v[2] }))?;
+                plausible(run.0, run.1).then_some(run)
             })
             .collect::<Vec<_>>();
         let skip = runs.len().saturating_sub(PACE_RUNS);
@@ -243,7 +244,7 @@ impl Pace {
     }
 
     pub fn record(&mut self, secs: f32, t: Timing) {
-        if secs < 0.5 || !(t.encode.is_finite() && t.decode.is_finite()) {
+        if !plausible(secs, t) {
             return;
         }
         self.runs.push((secs, t));
@@ -279,6 +280,14 @@ impl Pace {
         };
         Timing { encode: fit(|t| t.encode, PRIOR_ENCODE), decode: fit(|t| t.decode, PRIOR_DECODE) }
     }
+}
+
+/// Whether a run says something about this machine's speed. Too-short clips are all overhead,
+/// and a run slower than realtime by half a minute was interrupted (the PC slept, say); one of
+/// those would leave the bar crawling for weeks.
+fn plausible(secs: f32, t: Timing) -> bool {
+    let ok = |v: f32| v.is_finite() && v >= 0.0;
+    ok(secs) && ok(t.encode) && ok(t.decode) && secs >= 0.5 && t.encode + t.decode < secs + 30.0
 }
 
 /// Least-squares `y = a + b x` over (x, y, weight), with neither term allowed below zero.
@@ -362,6 +371,7 @@ mod tests {
         assert!(total(pace.predict(10.0)) < 1.0, "{:?}", pace.predict(10.0));
         pace.record(0.1, Timing { encode: 50.0, decode: 50.0 }); // too short to learn from
         pace.record(10.0, Timing { encode: f32::NAN, decode: 0.1 });
+        pace.record(10.0, Timing { encode: 3600.0, decode: 0.1 }); // the PC slept mid-transcription
         assert!(total(pace.predict(10.0)) < 1.0);
     }
 
@@ -373,7 +383,7 @@ mod tests {
         }
         assert_eq!(pace.runs.len(), PACE_RUNS);
         assert_eq!(Pace::parse(&pace.to_text()), pace);
-        assert_eq!(Pace::parse("garbage\n1 2\n-1 0.2 0.1\n"), Pace::default());
+        assert_eq!(Pace::parse("garbage\n1 2\n-1 0.2 0.1\n10 4000 1\n"), Pace::default());
         let p = Pace::default().predict(0.0);
         assert!(p.encode > 0.0 && p.decode >= 0.0);
     }
