@@ -143,10 +143,14 @@ impl Overlay {
         self.pill.show(view);
         self.render(0.0);
         unsafe {
-            if !self.shown && view != View::Hidden {
+            if view != View::Hidden {
+                // Re-assert topmost on every change: another topmost window (fullscreen app,
+                // picture-in-picture, the taskbar) may have covered us since we were last placed.
                 self.place();
-                ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
-                self.shown = true;
+                if !self.shown {
+                    ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+                    self.shown = true;
+                }
             }
             if self.pill.animating() || view == View::Flash || (view == View::Hidden && self.shown) {
                 SetTimer(self.owner, TIMER, 16, None);
